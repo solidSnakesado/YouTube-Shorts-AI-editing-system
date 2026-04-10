@@ -1,0 +1,43 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# --- AI & Media Processing (대용량 파일 방지) ---
+# 로컬 GPU 분석 결과물 및 편집된 쇼츠 영상
+outputs/
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# AI 모델 가중치 (WAN 2.1, SDXL 등) 및 체크포인트
+models/
+weights/
+*.pth
+*.bin
+*.onnx
+*.ckpt
+
+# --- Environment & Security (보안 필수) ---
+# YouTube API Key나 DB 접속 정보가 담긴 환경 변수
+.env
+.env.local
+secrets.json
+
+# --- OS & IDE (작업 환경 최적화) ---
+# macOS (Mac Studio 사용 시 생성)
+.DS_Store
+# Windows (WSL2와 혼용 시 생성)
+Thumbs.db
+desktop.ini
+
+# IDE Settings (개인 설정 제외)
+.vscode/
+.idea/
