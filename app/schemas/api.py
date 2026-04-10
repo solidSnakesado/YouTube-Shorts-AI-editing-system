@@ -89,10 +89,10 @@ class ShortResponse(BaseModel):
     end_sec: float                      # 끝 시점 (초)
     duration_sec: Optional[float]       # end - start 계산값 (API에서 편의 제공)
     highlight_reason: Optional[str]     # LLM의 선정 사유
-    hook_score: Optional[str]           # 흥미도 점수 (0~1)
+    hook_score: Optional[float]           # 흥미도 점수 (0~1)
     output_path: Optional[str]          # 완성된 파일 경로
     title_suggestion: Optional[str]     # 제안 제목
-    tag_suggestion: Optional[str]       # 제안 태그 (JSON 배열)
+    tags_suggestion: Optional[str]       # 제안 태그 (JSON 배열)
     created_at: datetime                
 
     model_config = {"from_attributes": True}
@@ -130,4 +130,4 @@ class SysterStatus(BaseModel):
     """
     status: str                     # "healthy"
     gpu: GPUStatus                  # GPU 상세 정보
-    model_loaded: list[str] = []    # 현재 GPU에 로드된 모델 목록 (2주차 구현)
+    models_loaded: list[str] = []    # 현재 GPU에 로드된 모델 목록 (2주차 구현)

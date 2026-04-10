@@ -109,7 +109,7 @@ class VideoService:
             _, stderr = await process.communicate()
 
             if process.returncode != 0:
-                raise RuntimeError(f"yt-dlp 실패: {stderr.decode}")
+                raise RuntimeError(f"yt-dlp 실패: {stderr.decode()}")
             
             # - FFmpeg로 오디오 추출 -
 
@@ -168,7 +168,7 @@ class VideoService:
         """
         
         cmd = [
-            "ffprobe", "-v", "quit",                            # 불필요한 출력 숨김
+            "ffprobe", "-v", "quiet",                            # 불필요한 출력 숨김
             "-print_format", "json",                            # JSON 형식으로 출력
             "-show_format",                                     # 포맷 정봏 (길이, 비트레이트 등) 출력
             video_path,
