@@ -3,6 +3,10 @@
 #       비즈니스 로직, DB 접근 코드를 이곳에 작성하지 않는다.
 # 의존: VideoService, AnalysisService (DI로 주입받음)
 # MVA 원칙: API 계층은 요청/응담 반환만 담당, 로직은 서비스로 위임
+#
+# 3~5일차 변경사항:
+#   - POST /{project_id}/transcribe 엔드포인트 추가 (Whisper ASR)
+#   - POST /{project_id}/analyze 엔드포인트에 전사 -> 하이라이트 2단계 흐름 반영
 
 """
 프로젝트 엔드포인트
@@ -121,6 +125,51 @@ async def download_video(
     
     return ProjectResponse(**project.__dict__, shorts_count=0)
 
+@router.post("/{project_id}/transcribe", response_model=ProjectResponse)
+async def transcribe_video(
+    project_id: str,
+    analysis_svc: AnalysisService = Depends(get_analysis_service),
+    video_svc: VideoService = Depends(get_video_service)
+):
+    """
+    음성 전사 실행 (3~5일차 신규 엔드포인트)
+
+    POST /api/v1/projects/{id}/transcribe
+
+    파이프라인에서의 위치:
+        download -> **transcribe** -> analyze (하이라이트 추출)
+
+    faster-whisper를 사용하여 오디오를 텍스트로 변환하고, 
+    단어 단위 타임스탬프를 포함한 결과를 project.transcript_json에 저장
+
+    전제 조건:
+        - 다운로드가 완료되어 project.audio_path에 WAV 파일이 존재해야 함
+        - project.status가 ANALYZING 상태여야 함 (download 완료 후 자동 전환)
+
+    응답:
+        - 성공: ProjectResponse (transcript_json이 채워진 상태)
+        - 실패: 404 (프로젝트 미존재) 또는 500 (전사 실패)
+    """  
+
+    # 프로젝트 존재 확인
+    project = await video_svc.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+    
+    # 전사 실행
+    update_project = await analysis_svc.transcribe(project_id)
+
+    if not update_project:
+        raise HTTPException(
+            status_code=500,
+            detail="음성 전사에 실패했습니다. 프로젝트 상태를 확인하세요."
+        )
+    
+    return ProjectResponse(
+        **update_project.__dict__,
+        shorts_count=0,
+    )
+
 @router.post("/{project_id}/analyze")
 async def analyze_video(
     project_id: str,
@@ -128,11 +177,17 @@ async def analyze_video(
     analysis_svc: AnalysisService = Depends(get_analysis_service),
 ):
     """
-    영상 분석 및 하이라이트 추출 시작
+    하이라이트 구간 추축 (LLM 기반)
 
     POST /api/v1/projects/{id}/analyze?max_shorts=5
-    현재는 501 Not Implemented 반환 (스텁 상태)
-    3~7일차에 Whisper + LLM 구현 후 정상 동작
+
+    파이프라인에서의 위치:
+        download -> transcribe -> **analyze** 
+
+    전제 조건:
+        - 전사가 완료되어 project.transcript_json이 존재해야 함
+
+    현재 상태: 6~7일차 구현 예정 (501 반환)
     """
     
     try:
