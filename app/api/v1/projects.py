@@ -2,11 +2,14 @@
 # 역할: HTTP 요청을 받아 서비스 계층에 위임하고, 응답을 반환
 #       비즈니스 로직, DB 접근 코드를 이곳에 작성하지 않는다.
 # 의존: VideoService, AnalysisService (DI로 주입받음)
-# MVA 원칙: API 계층은 요청/응담 반환만 담당, 로직은 서비스로 위임
+# MVA 원칙: API 계층은 요청/응답 반환만 담당, 로직은 서비스로 위임
 #
 # 3~5일차 변경사항:
 #   - POST /{project_id}/transcribe 엔드포인트 추가 (Whisper ASR)
-#   - POST /{project_id}/analyze 엔드포인트에 전사 -> 하이라이트 2단계 흐름 반영
+# 6~7일차 변경사항:
+#   - POST /{project_id}/analyze 엔드포인트: 501 스텁 -> 실제 동작
+#   - 응답 모델을 ShortListResponse로 변경 (생성한 쇼츠 목록 변환)
+#   - ShortResponse import 추가
 
 """
 프로젝트 엔드포인트
@@ -20,7 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.dependencies import get_video_service, get_analysis_service
 
 # 요청/응답 스키마 (Pydantic 모델)
-from app.schemas.api import ProjectCreate, ProjectResponse, ProjectListResponse
+# ShortResponse, ShortListResponse: 6~7일차에 analyze 응답용으로 추가
+from app.schemas.api import ProjectCreate, ProjectResponse, ProjectListResponse, ShortResponse, ShortsListResponse
 
 # 서비스 클래스 (타입 힌트용)
 from app.services.video_service import VideoService
@@ -48,7 +52,7 @@ async def create_project(
         - youtube_url이 유효한 URL 인지
         - max_shorts가 1~20범위 인지
         - shorts_duration_sec이 15~180 범위인지
-    -> 검증 실해 시 FastAPI가 자동으로 422 Validation Error 반환
+    -> 검증 실패 시 FastAPI가 자동으로 422 Validation Error 반환
     """
     
     project = await video_svc.create_project(str(body.youtube_url))
@@ -91,8 +95,7 @@ async def get_project(
     """
     프로젝트 상세 조회 (관련 쇼츠 포함)
 
-    GET /api/v1/projects/6b91314e-937a-4c2f-857c-571ba39f1d8d
-    Response: ProjectResponse (shorts_count 포함)
+    GET /api/v1/projects/{project_id}
     """
     
     project = await video_svc.get_project(project_id)
@@ -136,8 +139,7 @@ async def transcribe_video(
 
     POST /api/v1/projects/{id}/transcribe
 
-    파이프라인에서의 위치:
-        download -> **transcribe** -> analyze (하이라이트 추출)
+    파이프라인에서의 위치: download -> **transcribe** -> analyze (하이라이트 추출)
 
     faster-whisper를 사용하여 오디오를 텍스트로 변환하고, 
     단어 단위 타임스탬프를 포함한 결과를 project.transcript_json에 저장
@@ -160,39 +162,54 @@ async def transcribe_video(
     update_project = await analysis_svc.transcribe(project_id)
 
     if not update_project:
-        raise HTTPException(
-            status_code=500,
-            detail="음성 전사에 실패했습니다. 프로젝트 상태를 확인하세요."
-        )
+        raise HTTPException(status_code=500, detail="음성 전사에 실패했습니다. 프로젝트 상태를 확인하세요.")
     
-    return ProjectResponse(
-        **update_project.__dict__,
-        shorts_count=0,
-    )
+    return ProjectResponse(**update_project.__dict__, shorts_count=0)
 
-@router.post("/{project_id}/analyze")
+@router.post("/{project_id}/analyze", response_model=ShortsListResponse)
 async def analyze_video(
     project_id: str,
-    max_shorts: int = 5,
+    max_shorts: int = 5,    # 쿼리 파라미터: ?max_shorts=3
     analysis_svc: AnalysisService = Depends(get_analysis_service),
+    video_svc: VideoService = Depends(get_video_service),
 ):
     """
-    하이라이트 구간 추축 (LLM 기반)
+    하이라이트 구간 추출 (LLM 기반) - 6~7일차 구현 완료
 
     POST /api/v1/projects/{id}/analyze?max_shorts=5
 
-    파이프라인에서의 위치:
-        download -> transcribe -> **analyze** 
+    파이프라인에서의 위치: download -> transcribe -> **analyze** 
 
     전제 조건:
         - 전사가 완료되어 project.transcript_json이 존재해야 함
-
-    현재 상태: 6~7일차 구현 예정 (501 반환)
-    """
+        - project.status가 ANALYZING 상태
     
-    try:
-        shorts = await analysis_svc.extract_highlights(project_id, max_shorts)
-        return {"message": "분석 완료", "short_count": len(shorts)}
-    except NotImplementedError as e:
-        # 501: 아직 구현되지 않은 기능
-        raise HTTPException(status_code=501, detail=str(e))
+    응답:
+        - 성공: ShortListResponse (생성된 쇼츠 목록 + total)
+        - 실패: 404 (프로젝트 미존재) 또는 500 (추출 실패)
+
+    이전 상태: 501 Not Implemented (스텁)
+    """
+
+    # 프로젝트 존재 확인
+    project = await video_svc.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+    
+    # 하이라이트 추출 실행 (서비스 계층에 위임)
+    shorts = await analysis_svc.extract_highlights(project_id, max_shorts)
+    if not shorts:
+        raise HTTPException(status_code=500, detail="하이라이트 추출에 실패했습니다.")
+    
+    # Shorts 엔티티 -> ShortResponse 스키마 변환
+    return ShortsListResponse(
+        items=[
+            ShortResponse(
+                **s.__dict__,
+                # duration_sec: DB 컬럼이 아닌 계산 필드 (API 편의용)
+                duration_sec=round(s.end_sec - s.start_sec, 3),
+            )
+            for s in shorts
+        ],
+        total=len(shorts),
+    )

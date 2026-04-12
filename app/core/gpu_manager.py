@@ -1,7 +1,6 @@
-내용 추가 필요
 # 계층: 인프라 계층 (Core)
 # 역할: GPU VRAM 모델 로드/언로드/스위칭 전략을 중앙 관리
-#       Whiper, LLM, YOLO 등 GPU 모델의 생명주기를 통합 제어하여
+#       Whisper, LLM, YOLO 등 GPU 모델의 생명주기를 통합 제어하여
 #       한정된 VRAM(11.9GB)에서 모델 간 안전한 교체를 보장
 # 의존: app.core.config (모델 설정값)
 # MVA 원칙: GPU 리소스 관리는 인프라 책임, 서비스 계층에서 분리
@@ -10,6 +9,10 @@
 #   - AnalysisService: Whisper 로드/언로드(3~5일차)
 #   - AnalysisService: LLM 로드/언로드(6~7일차)
 #   - EditingService: YOLO 로드/언로드(8~10일차)
+#
+# 6~7일차 변경사항:
+#   - load_llm() 추가: OpenAI API / 로컬 Gemma 4 GGUF 이중 경로
+#   - _resolve_gguf_path() 추가: 모델 파일 탐색 + 다운로드 안내
 
 """
 GPU 모델 관리자
@@ -18,10 +21,11 @@ VRAM 모델 로드/언로드 및 메모리 해제를 중앙 관리
 모델 스위칭 전략의 핵심 모듈
 """
 
-import gc
-from typing import Any, Optional
+import gc                               # 가비지 컬렉터: 순환 참조 포함 객체 해제   
+from pathlib import Path                # OS 독립적 파일 경로 처리
+from typing import Any, Optional        
 
-from loguru import logger
+from loguru import logger               # 구조화된 로깅 라이브러리
 
 from app.core.config import settings
 
@@ -37,7 +41,7 @@ def release_vram() -> None:
         - 다음 모델 모드 직전 (안전 장치)
 
     해제 순서:
-        1. gc,collect(): 순환 참조 포함 Python 객체 해제
+        1. gc.collect(): 순환 참조 포함 Python 객체 해제
         2. torch.cuda.empty_cache(): PyTorch VRAM 캐시 반환
     """
 
@@ -48,7 +52,7 @@ def release_vram() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except ImportError:
-        pass
+        pass                            # torch 미설치 환경에서도 에러 없이 진행
 
 def get_vram_status() -> dict:
     """
@@ -89,13 +93,12 @@ def load_whisper() -> Any:
         WhisperModel 인스턴스
     """
 
+    # 지연 임포트 faster_whisper가 설치되지 않은 환경에서 다른 기능 사용 가능
     from faster_whisper import WhisperModel
 
     logger.info(
-        f"Whisper 모델 로드 시작 | "
-        f"모델: {settings.WHISPER_MODEL_SIZE} | "
-        f"디바이스: {settings.WHISPER_DEVICE} | "
-        f"compute_type: {settings.WHISPER_COMPUTE_TYPE}"
+        f"Whisper 모델 로드 시작 | 모델: {settings.WHISPER_MODEL_SIZE} | "
+        f"디바이스: {settings.WHISPER_DEVICE} | compute_type: {settings.WHISPER_COMPUTE_TYPE}"
     ) 
 
     model = WhisperModel(
@@ -106,6 +109,109 @@ def load_whisper() -> Any:
 
     logger.info(f"Whisper 모델 로드 완료: {settings.WHISPER_MODEL_SIZE}")
     return model
+
+def load_llm() -> dict:
+    """
+    LLM 모델 로드 (이중 경로) - 6~7일차 신규
+
+    경로 분기:
+        OPENAI_API_KEY 있음 -> OpenAI 클라이언트 반환 (GPU 미사용)
+        OPENAI_API_KEY 없음 -> Gemma 4 E4B Q8_0 GGUF 로컬 로드
+
+    Gemma 4 E4B Q8_0 선택 이유
+        - 파라미터: 4B effective (PLE 아키텍처로 파라미터 효율 극대화)
+        - VRAM: ~8~9GB -> RTX 5070 Ti (11.9GB)에 여유롭게 적재
+        - 컨텍스트: 최대 128K 지원 (설정에서 8K 사용)
+        - 26B-A4B(UD-Q4_K_XL)는 12GB에서 fit-based 배치 필요 + OOM 위험 -> 안전성을 위해 E4B Q8_0 선택
+        - llama.cpp에서 Gemma 4 GGUF 공식 지원 확인 완료 (2026.04 기준)
+
+    다운로드 명령어:
+        huggingface-cli download unsloth/gemma-4-E4B-it-GGUF \\
+            --include "*Q8_0*" --local-dir ./model/llm/
+
+    Returns:
+        {"type": "openai", "client": OpenAI()} 또는
+        {"type": "local", "model": Llama()}
+    """
+
+    # 경로 1: OpenAI API (VRAM 미사용, 클라우드)
+    if settings.OPENAI_API_KEY:
+        logger.info("LLM 로드: OpenAI API 모드 (GPU 미사용)")
+        # 지연 임포트: openai 미설치 시 로컬 경로만 사용 가능
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        return {"type": "openai", "client": client}
+    
+    # 경로 2: 로컬 Gemma 4 E4B GGUF (GPU 사용)
+    model_path = _resolve_gguf_path()
+
+    logger.info(
+        f"LLM 로드 시작 | Gemma 4 E4B Q8_0 | "
+        f"파일: {model_path.name} | "
+        f"GPU 레이어: {settings.LLM_N_GPU_LAYERS} | "
+        f"컨텍스트: {settings.LLM_CTX_SIZE}" 
+    )
+
+    # 지연 임포트: llama-cpp-python이 설치되지 않은 환경 대응
+    from llama_cpp import Llama
+
+    # n_gpu_layers=-1: 모든 레이어를 GPU에 올림 (12GB VRAM이면 E4B 전체 적재 가능)
+    # n_ctx=8192: 하이라이트 추출에 필요한 컨텍스트 크기 (전사 텍스트 + 프롬프트)
+    # verbose=False: llama.cpp 내부 로그 비활성화 (loguru로 통합)
+    model = Llama(
+        model_path=str(model_path),
+        n_gpu_layers=settings.LLM_N_GPU_LAYERS,
+        n_ctx=settings.LLM_CTX_SIZE,
+        verbose=False,
+    )
+
+    vram = get_vram_status()
+    logger.info(
+        f"LLM 로드 완료: {model_path.name} | "
+        f"VRAM: {vram['allocated_mb']}MB"
+    )
+    return {"type": "local", "model": model}
+
+def _resolve_gguf_path() -> Path:
+    """
+    GGUF 모델 파일 경로 확정 - 6~7일차 신규
+
+    탐색 순서:
+        1. settings.llm_model_file - config에서 조합된 전체 경로
+           (LLM_MODEL_PATH + LLM_MODEL_NAME)
+        2. LLM_MODEL_PATH 디렉토리 내 .gguf 파일 자동 탐색
+           (여러 개면 가장 큰 파일 선택 - 보통 더 정확한 양자화)
+        3. 못 찾으면 FileNotFoundError + 다운로드 안내 메시지
+
+    Returns:
+        확정된 GGUF 파일 Path
+    """
+
+    # 1. config에서 지정한 경로 확인 (LLM_MODEL_PATH + LLM_MODEL_NAME)
+    configured = settings.llm_model_file
+    if configured.is_file():
+        return configured
+    
+    # 2. 디렉토리 내 .gguf 파일 자동 탐색
+    model_dir = Path(settings.LLM_MODEL_PATH)
+    if model_dir.is_dir():
+        gguf_files = list(model_dir.glob("*.gguf"))
+        if gguf_files:
+            # 가장 큰 파일 선택 (Q8_0 > Q4_K_M > Q3_K 순으로 보통 파일 크기가 큼)
+            chosen = max(gguf_files, key=lambda f: f.stat().st_size)
+            logger.info(f"GGUF 자동 탐색: {chosen.name}")
+            return chosen
+        
+    # 3. 못 찾음 -> 다운로드 안내
+    raise FileNotFoundError(
+        f"GGUF 모델 파일을 찾을 수 없습니다.\n"
+        f"  설정 경로: {configured}\n"
+        f"  탐색 디렉토리: {model_dir}\n\n"
+        f"다운로드 방법:\n"
+        f"  huggingface-cli download unsloth/gemma-4-E4B-it-GGUF \\\n"
+        f"      --include '*Q8_0*' --local-dir ./models/llm/\n\n"
+        f"또는 OPENAI_API_KEY를 .env에 설정하세요."
+    )
 
 def unload_model(model: Optional[Any], model_name: str = "모델") -> None:
     """
@@ -122,12 +228,11 @@ def unload_model(model: Optional[Any], model_name: str = "모델") -> None:
     if model is None:
         return
     
-    del model
-    release_vram()
+    del model                   # 참조 제거 -> GC 대상으로 등록
+    release_vram()              # gc.collect() + torch.cuda.empty_cache()
 
     vram = get_vram_status()
     logger.info(
         f"{model_name} 언로드 완료 | "
-        f"VRAM allocated: {vram['allocated_mb']}MB | "
-        f"VRAM reserved: {vram['reserved_mb']}MB"
+        f"VRAM allocated: {vram['allocated_mb']}MB / VRAM reserved: {vram['reserved_mb']}MB"
     )

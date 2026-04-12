@@ -2,14 +2,20 @@
 # 역할: 애플리케이션 전역 환경 설정을 중앙 관리
 #       .env 파일의 값을 읽어와 Python 타입으로 자동 변환하며,
 #       잘못된 값이 들어오면 서버 시작 시점에 즉시 에러를 발생 시킨다.
-# 의존: 없음 (최하의 인프라 모듈 - 다른 모듈이 이 모듈에 의좀)
-# MVA 원칙: 설정 외부화 - 환결 변수 하드코딩 금지, 환경별 설정 분리
+# 의존: 없음 (최하위 인프라 모듈 - 다른 모듈이 이 모듈에 의존)
+# MVA 원칙: 설정 외부화 - 환경 변수 하드코딩 금지, 환경별 설정 분리
+#
+# 6~7일차 변경사항:
+#   - LLM_MODEL_NAME 필드 추가 (GGUF 파일명 명시)
+#   - LLM_N_GPU_LAYERS 기본값 -1로 변경 (전체 GPU 오프로드)
+#   - LLM_CTX_SIZE 기본값 8192로 변경 (하이라이트 추출에 충분)
+#   - llm_model_file 프로퍼티 추가 (경로 + 파일명 조합)
 
 """
 환경 설정 모듈
 
 모든 환경 변수를 Pydantic Setting로 관리한다.
-.env 파일에서 값을 읽어오며, 타입 검증이 자동으로 수핸된다.
+.env 파일에서 값을 읽어오며, 타입 검증이 자동으로 수행된다.
 """
 
 from pathlib import Path            # 파일 경로를 OS 독립적으로 처리하기 위한 표준 라이브러리
@@ -28,7 +34,7 @@ class Settings(BaseSettings):
     이 클래스의 각 필드는 .env 파일의 키와 1:1 매핑
         ex> APP_NAME="YT Shorts AI" -> self.APP_NAME = "YT Shorts AI"
 
-    타입 힌트(str, int, bool 등)에 따라 자동 변횐되므로,
+    타입 힌트(str, int, bool 등)에 따라 자동 변환되므로,
     .env에 문자열로 "8000"이라고 작성되어 있어도 APP_PORT는 int(8000)이 됨
     """
 
@@ -42,10 +48,10 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------
     # 애플리케이션 기본 설정
     # --------------------------------------------------------------
-    APP_NAME: str = "YT Shorts AI"                                              # Swagger UI 제모ㅓㄱ에 표시
+    APP_NAME: str = "YT Shorts AI"                                              # Swagger UI 제목에 표시
     APP_ENV: Literal["development", "staging", "production"] = "development"    # Literal 타입: 이 세 값 중 하나만 허용, 그 외 값이 들어오면 서버 시작시 ValidationError 발생
     APP_DEBUG: bool = True                                                      # True 이면 SQLAlchemy 쿼리 로그 출력 등 디버그 모드 활성화
-    APP_HOST: str = "0.0.0.0"                                                   # 0.0.0.0 = 모든 네크워크 인터페이스에서 접속 허용
+    APP_HOST: str = "0.0.0.0"                                                   # 0.0.0.0 = 모든 네트워크 인터페이스에서 접속 허용
     APP_PORT: int = 8000                                                        # Uvicorn 서버 포트
 
     # --------------------------------------------------------------
@@ -64,23 +70,34 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"                       # JWT 서명 알고리즘 (HMAC-SHA256)
 
     # --------------------------------------------------------------
-    # AI 모델 설정
+    # AI 모델 - Whisper (faster-whisper)
     # --------------------------------------------------------------
-    WHISPER_MODEL_SIZE: str = "medium"              # tiny|base|small|medium|lagge-v3-torbo
+    WHISPER_MODEL_SIZE: str = "medium"              # tiny|base|small|medium|large-v3-torbo
     WHISPER_DEVICE: str = "cuda"                    # cuda(GPU) 또는 cpu
     WHISPER_COMPUTE_TYPE: str = "float16"           # float16(빠름) 또는 int8(VRAM 절약)
 
+    # --------------------------------------------------------------
+    # AI 모델 - YOLO (ultralytics)
+    # --------------------------------------------------------------
     YOLO_MODEL: str = "yolov8n.pt"                  # n(nano)|s(small)|m(medium) - 정확도 UP -> VRAM UP
     YOLO_DEVICE: str = "cuda"
 
-    LLM_MODEL_PATH: str = "./models/llm/"           # 로컬 GGUF 모델 파일 경로
-    LLM_N_GPU_LAYERS: int = 35                      # GPU에 오프로드할 레이어 수 (-1 -> 전부)
-    LLM_CTX_SIZE: int = 4096                        # LLM 컨텍스트 윈도우 크기 (토큰)
+    # --------------------------------------------------------------
+    # AI 모델 - 로컬 LLM (Gemma 4 E4B, llama-cpp-python)
+    # --------------------------------------------------------------
+    # Gemma 4 E4B Q8_0: ~8~9GB VRAM, RTX 5070 Ti (11.9GB)에 적합
+    # 모델 다운로드 명령어
+    #   huggingface-cli download unsloth/gemma-4-E4B-it-GGUF \
+    #     --include "*Q8_0*" --local-dir ./model/llm/
+    LLM_MODEL_PATH: str = "./models/llm/"               # 로컬 GGUF 모델 파일 경로
+    LLM_MODEL_NAME: str = "gemma-4-E4B-it-Q8_0.gguf"    # GGUF 파일명 (6~7일차 추가)
+    LLM_N_GPU_LAYERS: int = -1                          # -1: 모든 레이어를 GPU에 오프로드 (12GB VRAM 충분)
+    LLM_CTX_SIZE: int = 8192                            # 하이라이트 추출에 8K 컨텍스트면 충분
 
     # --------------------------------------------------------------
     # 외부 API (선택 사항)
     # --------------------------------------------------------------
-    # 빈 문자열이면 로컬 LLM 사용, 값이 있으면 API 사용
+    # 빈 문자열이면 로컬 Gemma 4 사용, 값이 있으면 API 사용
     OPENAI_API_KEY: str = ""
 
     # --------------------------------------------------------------
@@ -132,6 +149,24 @@ class Settings(BaseSettings):
         p = Path(self.TEMP_DIR)
         p.mkdir(parents=True, exist_ok=True)
         return p
+    
+    @property
+    def llm_model_file(self) -> Path:
+        """
+        LLM GGUF 모델 파일의 전체 경로 (6~7일차 추가)
+
+        LLM_MODEL_PATH가 직접 .gguf 파일이면 그대로 반환
+        디렉토리이면 LLM_MODEL_NAME과 결합하여 반환
+
+        ex> "./models/llm/" + "gemma-4-E4B-it-Q8_0.gguf"
+            -> Path("./models/llm/gemma-4-E4B-it-Q8_0.gguf")
+        """
+        
+        path = Path(self.LLM_MODEL_PATH)
+        if path.is_file() and path.suffix == ".gguf":
+            return path
+        
+        return path / self.LLM_MODEL_NAME
     
 # 최초 1회만 Settings 객체 생성, 이후 호출에서는 캐시된 동일 객체 반환
 @lru_cache
