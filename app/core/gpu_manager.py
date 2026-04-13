@@ -13,6 +13,9 @@
 # 6~7일차 변경사항:
 #   - load_llm() 추가: OpenAI API / 로컬 Gemma 4 GGUF 이중 경로
 #   - _resolve_gguf_path() 추가: 모델 파일 탐색 + 다운로드 안내
+#
+# 8~10일차 변경사항:
+#   - load_yolo() 추가: YOLOv8n GPU 로드 (리프레이밍용 객체 탐지)
 
 """
 GPU 모델 관리자
@@ -171,6 +174,44 @@ def load_llm() -> dict:
         f"VRAM: {vram['allocated_mb']}MB"
     )
     return {"type": "local", "model": model}
+
+def load_yolo() -> Any:
+    """
+    YOLOv8 객체 탐지 모델 로드 - 8~10일차 신규
+
+    리프레이밍에서 프레임별 피사체(인물) 위치 추적에 사용
+
+    모델 크기별 VRAM (RTX 5070 Ti 11.9GB):
+        YOLOv8n (nano):     ~1~2GB VRAM, ~200 FPS (채택)
+        YOLOv8s (small):    ~2~3GB VRAM, ~150 FPS
+        YOLOv8m (medium):   ~4~5GB VRAM, ~100 FPS
+
+    Returns:
+        ultralytics.YOLO 인스턴스 (GPU에 로드됨)
+    """
+
+    # 지연 임프트: ultralytics 미설치 환경에서 다른 기능 사용 가능
+    from ultralytics import YOLO
+
+    model_name = settings.YOLO_MODEL        # 기본값: "yolov8n.pt"
+    device = settings.YOLO_DEVICE           # 기본값: "cuda"
+
+    logger.info(f"YOLO 모델 로드 시작 | 모델: {model_name} | 디바이스: {device}")
+
+    # YOLO()는 모델 파일이 없으면 자동 다운로드 (ultralytics 내장)
+    # model.yolo/ 디렉토리에 캐싱됨
+    model = YOLO(model_name)
+
+    # GPU로 이동 (cuda/cpu 분기)
+    # model.to()는 내부적으로 PyTorch .to(device) 호출
+    model.to(device)
+
+    vram = get_vram_status()
+    logger.info(
+        f"YOLO 모델 로드 완료: {model_name} | "
+        f"VRAM: {vram['allocated_mb']}MB"
+    )
+    return model
 
 def _resolve_gguf_path() -> Path:
     """

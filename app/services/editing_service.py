@@ -1,22 +1,40 @@
 # 계층: 비즈니스 로직 계층 (Service)
 # 역할: 지능형 리프레이밍, 자막 합성, GPU 가속 인코딩 로직
-#       현재는 스텁(stub) 상태 -> 2주차에 실제 구현 예정
-# 의존: ShortsRepository (DI로 주입받음)
-# MVA 원칙: 의도적 코드 수준 부채 -> 아키텍터 토대만 확보
+# 의존: ShortsRepository, ProjectRepository (DI로 주입받음)
+# MVA 원칙: 서비스 = 순수 비즈니스 로직, GPU 관리는 인프라 계층에 위임
+#
+# 8~10일차 변경사항:
+#   - reframe_clip(): NotImplementedError 스텁 -> 실제 구현
+#   - load_yolo, unload_model import 추가
+#   - reframe_engine 헬퍼 모듈 import 추가
+#   - _run_reframe() 내부 메서드 추가 (동기, 스레드 풀에서 실행)
+#   - ProjectRepository 주입 추가 (소스 영상 경로 조회용)
 
 """
 편집 서비스
 
 지능형 리프레이밍, 자막 합성, GPU 가속 인코딩 로직
-2주차 핵심 구현 대상
 """
 
+import asyncio
+from pathlib import Path
 from typing import Optional
 
 from loguru import logger
 
-from app.models.domain import Shorts, ShortStatus
+from app.core.config import settings
+
+# gpu_manager에서 모델 로드/언도르 함수를 import
+# 모킹 시 patch("app.services.editing_service.load_yolo") 로 패치
+from app.core.gpu_manager import load_yolo, unload_model
+from app.models.domain import Shorts, ShortStatus, Project
 from app.repositories.shorts_repository import ShortsRepository
+from app.repositories.project_repository import ProjectRepository
+
+# 리프레이밍 헬퍼 (300줄 규칙으로 분리된 모듈)
+from app.services.reframe_engine import (
+    detect_subjects, smooth_trajectory, choose_strategy, build_crop_timeline, run_ffmpeg_reframe,
+)
 
 class EditingService:
     """
@@ -26,35 +44,134 @@ class EditingService:
         1. 16:9 -> 9:16 지능평 리프레이밍 (YOLOv8 + FFmepg CUDA)
         2. 동적 자막 생성 (ASS 포맷)
         3. 최종 인코딩(NVENC H.264)
-        
-    이 서비스의 4개 메서드는 파이프라인 순서대로 실행
-    reframe_clip() -> generate_subtitles() -> encode_final()
+
+    VRAM 전략:
+        LLM 언로드 완료 후 YOLO 로드 (겹치지 않음)
+        YOLOv8n (~1~2GB) + FFmpeg CUDA -> 12GB VRAM 충분
     """
 
-    def __init__(self, shorts_repo: ShortsRepository):
+    def __init__(self, shorts_repo: ShortsRepository, project_repo: ProjectRepository):
         self.shorts_repo = shorts_repo
+        self.project_repo = project_repo
+        self._yolo_model = None             # 지연 로딩: 필요한 때만 GPU에 로드
 
-    async def reframe_clip(self, short_id: str) -> Optional[Shorts]:
+    async def reframe_clip(self, short_id: str, aspect_ratio: str = "9:16") -> Optional[Shorts]:
         """
         지능형 리프레이밍 (16:9 -> 9:16)
 
-        TODO (2주차 8~10일차)
-            - YOLOv8로 프레임별 피사체(인물 얼굴/손) 위치 추적
-            - 저대역 통과 필터로 카메라 이동 경로 스무딩 (떨림 방지)
-            - 장면 전환(Scene Cut) 감지 시 적응형 전략 선택:
-                · 고정 모드: 움직임 적을 때 화면 고정
-                · 팬 모드: 피사테가 한쪽에서 다른 쪽으로 이동 시 천천히 따라감
-                · 추적 모드: 액션 장면에서 피사체 중앙 유지
-                · 레터박스 모드: 크롭 시 정보 손실 클 때 상하단 배경 추가
-            - FFmpeg CUDA 필터(scale_cuda, crop_cuda)로 GPU 가속 크롭
+        흐름:
+            1. Shorts 엔티티 조회 -> 소스 영상 경로 확인
+            2. 상태 전환: QUEUED -> REFRAMING
+            3. YOLO 로드 -> 피사체 탐지 -> 스무딩 -> 전략 선택 -> 크롭 타임라인
+            4. FFmpeg로 리프레이밍 실행
+            5. 상태 전환: REFRAMING -> QUEUED (자막/인코딩 대기)
+            6. YOLO 언로드
 
-        RTX 5070 Ti에서의 기대 성능:
-            - YOLOv8n: ~200 FPS (실시간 대비 약 7배 속도)
-            - GPU 크롭: CPU 대비 약 3~5배 속도 향상
+        Args:
+            short_id: 편집할 쇼츠 ID
+            aspect_ratio: 목표 종횡비 (기본 "9:16")
+
+        Returns:
+            업데이트된 Shorts 엔티티, 실패 시 None
         """
 
-        logger.info(f"리프레이밍 시작: {short_id}")
-        raise NotImplementedError("2주차 구현 예정: 지능형 리프레이밍")
+        # 1. Shorts 엔티티 조회
+        short = await self.shorts_repo.get_by_id(short_id)
+        if not short:
+            logger.error(f"쇼츠를 찾을 수 없음: {short_id}")
+            return None
+        
+        # 소스 영상 경로 확인 (프로젝트에서 조회)
+        project = await self.project_repo.get_by_id(short.project_id)
+        if not project or not project.source_path:
+            logger.error(f"소스 영상 없음: project={short.project_id}")
+            await self._fail_short(short, "소스 영상 파일이 없습니다.")
+            return None
+        
+        source_path = project.source_path
+        if not Path(source_path).exists():
+            logger.error(f"소스 파일 미존재: {source_path}")
+            await self._fail_short(short, f"소스 파일을 찾을 수 없습니다: {source_path}")
+            return None
+        
+        # 2. 상태 전환: QUEUED -> REFRAMING
+        short = await self.shorts_repo.update(short, {"status": ShortStatus.REFRAMING})
+        logger.info(f"리프레이밍 시작: {short_id} | {short.start_sec:.1f}-{short.end_sec:.1f}s")
+
+        try:
+            # 3~4. YOLO 탐지 + FFmpeg 리프레이밍 (동기 작업은 스레드 풀에서 실행)
+            output_path = self._build_output_path(short)
+
+            # 피사체 탐지는 동기 (YOLO predict)
+            detections = await asyncio.get_event_loop().run_in_executor(
+                None, self._run_detection, source_path)
+            
+            # 스무딩 + 전략 선택 + 크롭 타임라인 (동기, 경량)
+            detections = smooth_trajectory(detections)
+            strategy = choose_strategy(detections)
+            timeline = build_crop_timeline(detections, strategy, aspect_ratio)
+
+            logger.info(f"리프레이밍 전략: {strategy} | 쇼츠: {short_id}")
+
+            # FFmpeg 실행 (비동기 서브프로세스)
+            success = await run_ffmpeg_reframe(source_path, str(output_path), timeline)
+
+            if not success:
+                await self._fail_short(short, "FFmpeg 리프레이밍 실패")
+                return None
+            
+            # 5. 상태 전환 + 출력 경로 저장
+            # 자막/인코딩은 11~12일차에 구현, 현재는 QUEUED로 유지
+            short = await self.shorts_repo.update(short, {
+                "output_path": str(output_path),
+                "status": ShortStatus.QUEUED,
+            })
+
+            logger.info(f"리프레이밍 완료: {short_id} -> {output_path}")
+            return short
+        
+        except Exception as e:
+            logger.error(f"리프레이밍 실패 [{short_id}]: {e}")
+            await self._fail_short(short, f"리프레이밍 실패: {str(e)}")
+            return None
+        finally:
+            # 6. YOLO 언로드 (성공/실패 무관)
+            unload_model(self._yolo_model, "YOLO")
+            self._yolo_model = None
+
+    # --------------------------------------------------------------
+    # 내부 메서드
+    # --------------------------------------------------------------
+
+    def _run_detection(self, source_path: str) -> list[dict]:
+        """
+        YOLO 피사체 탐지 실행 (동기 - 스레드 풀에서 호출)
+        """
+        
+        if self._yolo_model is None:
+            self._yolo_model = load_yolo()
+        return detect_subjects(self._yolo_model, source_path)
+
+    def _build_output_path(self, short: Shorts) -> Path:
+        """
+        리프레이밍 결과 파일 경로 생성
+        """
+
+        output_dir = settings.temp_path / short.project_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / f"reframed_{short.id}.mp4"
+    
+    async def _fail_short(self, short: Shorts, error_msg: str) -> None:
+        """
+        쇼츠 상태를 FAILED로 변경
+        """
+
+        logger.error(f"쇼츠 실패: {short.id} | {error_msg}")
+        await self.shorts_repo.update(short, {"status": ShortStatus.FAILED})
+
+    # --------------------------------------------------------------
+    # 스텁 메서드 (11~12일차 구현 예정)
+    # --------------------------------------------------------------
 
     async def generate_subtitles(self, shorts_id: str) -> Optional[Shorts]:
         """

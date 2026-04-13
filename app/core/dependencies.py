@@ -16,6 +16,7 @@
 # |      |                                                                     |
 # |  요청 종료 -> 세션 자동 커밋/롤백/종료                                         |
 # └────────────────────────────────────────────────────────────────────────────┘
+
 """
 의존성 주입 체인 모듈
 
@@ -78,8 +79,12 @@ def get_analysis_service(
     """
     return AnalysisService(project_repo, shorts_repo)
 
-def get_editing_service(shorts_repo: ShortsRepository = Depends(get_short_repo),) -> EditingService:
+def get_editing_service(
+    shorts_repo: ShortsRepository = Depends(get_short_repo),
+    project_repo: ProjectRepository = Depends(get_project_repo),
+) -> EditingService:
     """
-    편집 서비스 생성, 쇼츠 레포지토리를 주입받아 초기화
+    편집 서비스 생성, 쇼츠 + 프로젝트 레포지토리를 주입받아 초기화
+    8~10일차 변경: ProjectRepository 추가 (소스 영상 경로 조회용)
     """
-    return EditingService(shorts_repo)
+    return EditingService(shorts_repo, project_repo)
