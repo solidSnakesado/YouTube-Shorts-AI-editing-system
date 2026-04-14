@@ -1,16 +1,11 @@
 # 계층: 비즈니스 로직 계층 (Service)
-# 역할: 음성 인식 (ASR)과 LLM 기반 하이라이트 추출 로직
-#       3~5일차: Whisper ASR 구현 완료
-#       6~7일차: LLM 하이라이트 추출 구현 예정 (스텁)
+# 역할: 음성 인식 (ASR) + LLM 기반 하이라이트 추출 + 음성 없는 영상 풀백
 # 의존: ProjectRepository, ShortRepository (DI로 주입 받음), gpu_manager (인프라)
 # MVA 원칙: 서비스 = 순수 비즈니스 로직, GPU 관리는 인프라 계층에 위임
-# 
-# 6~7일차 변경: extract_highlights() 구현, _llm_handle 추가,
-#   load_llm/call_llm/parse_highlights import, _load_transcript/_run_highlight_extraction 추가
+# 6~7일차 : LLM 하이라이트 구현 / 11~12일차: 음성 미감지 시 시간 기반 분할 추간
 
 """
 분석 서비스
-
 음성 인식(ASR) 및 LLM 기반 하이라이트 추출 로직
 """
 
@@ -31,12 +26,11 @@ from app.repositories.project_repository import ProjectRepository
 from app.repositories.shorts_repository import ShortsRepository
 
 # LLM 프롬프트/호출.파싱 헬퍼 (300줄 규칙으로 분리된 모듈)
-from app.services.llm_highlight_extractor import (build_highlight_prompt, call_llm, parse_highlights)
+from app.services.llm_highlight_extractor import (build_highlight_prompt, call_llm, parse_highlights, create_time_based_highlights)
 
 class AnalysisService:
     """
     분석 서비스
-    
     책임:
         1. Whisper로 영상 음성을 텍스트로 전사 (ASR) - 구현 완료
         2. LLM으로 전사 텍스트에서 하이라이트 구간 추출 - 6~7일차 구현 예정
@@ -48,9 +42,7 @@ class AnalysisService:
     """
     
     def __init__(self, project_repo: ProjectRepository, shorts_repo: ShortsRepository):
-        """
-        DI 로 레포지토리를 주입 받음, 서비스는 레포지토리 메서드만 호출, SQL 이나 DB 세션을 직접 알지 못함
-        """
+        """DI 로 레포지토리를 주입 받음, 서비스는 레포지토리 메서드만 호출, SQL 이나 DB 세션을 직접 알지 못함"""
         
         self.project_repo = project_repo
         self.shorts_repo = shorts_repo
@@ -68,7 +60,6 @@ class AnalysisService:
 
         Args:
             project_id: 전사할 프로젝트 ID
-
         Returns:
             업데이트 된 Project (transcript_json 포함), 실패 시 None
         """
@@ -120,12 +111,10 @@ class AnalysisService:
             4. Shorts 엔티티 생성 및 DB 저장
             5. 상태 전환: ANALYZING -> EDITING
             6. LLM 언로드 (VRAM 해제)
-
         Args:
             project_id: 분석할 프로젝트 ID
             max_shorts: 추출할 최대 쇼츠 수
             duration_sec: 각 쇼츠의 목표 길이 (초)
-
         Returns:
             생성된 Shorts 엔티티 목록 (실패 시 빈 리스트)
         """
@@ -144,8 +133,16 @@ class AnalysisService:
         logger.info(f"하이라이트 추출 시작: {project_id}")
 
         try:
-            highlights = await asyncio.get_event_loop().run_in_executor(
-                None, self._run_highlight_extraction, transcript_data, max_shorts, duration_sec)
+            # 전사에 음성이 있는지 확인
+            has_speech = any(seg.get("text", "").strip() for seg in transcript_data.get("segments", []))
+            if has_speech:
+                highlights = await asyncio.get_event_loop().run_in_executor(
+                    None, self._run_highlight_extraction, transcript_data, max_shorts, duration_sec)
+            else:
+                # 음성 없는 영상 -> 시간 기반 균등 분할 (LLM 호출 생략)
+                logger.info(f"음성 미감지 - 시간 기반 분할: {project_id}")
+                total_dur = transcript_data.get("duration_sec", 0)
+                highlights = create_time_based_highlights(total_dur, max_shorts, duration_sec)
             
             if not highlights:
                 await self.project_repo.update_status(project_id, ProjectStatus.FAILED, "LLM이 하이라이트를 추출하지 못했습니다.")
@@ -181,7 +178,6 @@ class AnalysisService:
     def _validate_audio(self, project: Project) -> Optional[str]:
         """
         오디오 파일 존재 여부 검증
-
         Returns:
             에러 메시지 (문제 없으면 None)
         """
@@ -199,7 +195,6 @@ class AnalysisService:
     def _run_transcription(self, audio_path: str) -> dict:
         """
         faster-whisper 전사 실행 (동기 - 스레드 풀에서 호출)
-
         beam_size=5: 빔 서치 크기 (정확도 UP, 속도 DOWN)
         word_timestamps=True: 단어 단위 타임스탬프 생성 (자막용)
         vad_filter=True: 묵음 구간 자동 제거 (처리 속도 UP)
@@ -263,7 +258,6 @@ class AnalysisService:
     def _run_highlight_extraction(self, transcript_data: dict, max_shorts: int, duration_sec: int) -> list[dict]:
         """
         LLM 하이라이트 추출 실행 (동기 - 스레드 풀에서 호출)
-
         흐름: LLM 로드 -> 프롬프트 생성 -> LLM 호출 -> 응답 파싱
         각 단계는 llm_highlight_extractor 헬퍼 모듈의 함수를 사용
         """
@@ -277,7 +271,6 @@ class AnalysisService:
     async def _create_shorts_entities(self, project_id: str, highlights: list[dict]) -> list[Shorts]:
         """
         파싱된 하이라이트 목록을 Shorts 엔티티로 변환하여 DB 저장
-
         각 하이라이트 dict를 Shorts SQLModel 인스턴스로 변환하고, ShortsRepository.create()를 통해 DB에 INSERT
         """
 
