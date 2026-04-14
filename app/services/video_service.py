@@ -90,7 +90,7 @@ class VideoService:
             # --no-playlist: 재생목록이면 단일 영상만 다운로드
             cmd_video = [
                 "yt-dlp",
-                "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<1080]",
+                "-f", "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]",
                 "--merge-output-format", "mp4",
                 "--no-playlist",
                 "-o", str(video_path),
