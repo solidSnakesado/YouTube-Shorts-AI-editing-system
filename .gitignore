@@ -69,3 +69,4 @@ desktop.ini
 # IDE Settings (개인 설정 제외)
 .vscode/
 .idea/
+# ipynb 예외 — MVA 아키텍처 문서는 유지
