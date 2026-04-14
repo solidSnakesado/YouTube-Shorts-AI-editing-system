@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YT Shorts AI — Pipeline Test</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Noto+Sans+KR:wght@400;600;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0f; color: #e2e8f0; font-family: 'JetBrains Mono', 'Noto Sans KR', monospace; padding: 24px; min-height: 100vh; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #1a1a2e; } ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  h1 { font-size: 28px; font-weight: 700; background: linear-gradient(135deg, #6366f1, #a78bfa, #f472b6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
+  .subtitle { color: #64748b; font-size: 13px; text-align: center; margin-top: 4px; }
+  .container { max-width: 960px; margin: 24px auto; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: #111827; border-radius: 12px; padding: 20px; border: 1px solid #1e293b; }
+  .card-title { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; display: block; margin-bottom: 6px; }
+  input { width: 100%; padding: 10px 14px; font-size: 14px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; font-family: inherit; }
+  input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.2); }
+  .btn { padding: 10px 20px; font-size: 13px; font-weight: 700; font-family: inherit; border: none; border-radius: 8px; cursor: pointer; transition: transform 0.1s, opacity 0.1s; white-space: nowrap; }
+  .btn:active { transform: scale(0.96); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; }
+  .btn-secondary { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+  .steps { display: flex; gap: 6px; flex-wrap: wrap; }
+  .step-btn { flex: 1; min-width: 105px; padding: 12px 6px; font-size: 11px; font-family: inherit; font-weight: 600; background: #0f172a; border: 1px solid #334155; border-radius: 8px; cursor: pointer; color: #94a3b8; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all 0.15s; }
+  .step-btn.done { background: rgba(99,102,241,0.12); border-color: #6366f1; color: #a5b4fc; }
+  .step-btn .num { width: 22px; height: 22px; border-radius: 50%; font-size: 11px; display: flex; align-items: center; justify-content: center; background: #1e293b; color: #64748b; }
+  .step-btn.done .num { background: #6366f1; color: white; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+  .loading .num { animation: pulse 1.2s infinite; }
+  .flex-row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .flex-1 { flex: 1; min-width: 260px; }
+  .flex-2 { flex: 2; min-width: 340px; }
+  .info-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
+  .info-label { font-size: 12px; color: #94a3b8; }
+  code { font-size: 11px; color: #cbd5e1; background: #0f172a; padding: 2px 8px; border-radius: 4px; }
+  .badge { font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 20px; text-transform: uppercase; }
+  .short-btn { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; font-size: 12px; font-family: inherit; background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; cursor: pointer; color: #e2e8f0; transition: all 0.1s; width: 100%; margin-bottom: 6px; }
+  .short-btn.active { background: rgba(99,102,241,0.1); border-color: #6366f1; }
+  .short-num { font-size: 10px; font-weight: 700; color: #6366f1; background: rgba(99,102,241,0.15); padding: 2px 8px; border-radius: 4px; }
+  .score { color: #f59e0b; font-size: 11px; }
+  .error-bar { background: rgba(239,68,68,0.1); border: 1px solid #7f1d1d; border-radius: 8px; padding: 10px 16px; font-size: 13px; color: #fca5a5; display: flex; justify-content: space-between; align-items: center; }
+  .log-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #1e293b; }
+  .log-body { height: 260px; overflow-y: auto; padding: 8px 16px; }
+  .log-line { font-size: 12px; padding: 3px 0; }
+  .log-ts { color: #475569; margin-right: 8px; }
+  .log-info { color: #94a3b8; } .log-request { color: #60a5fa; } .log-success { color: #4ade80; } .log-error { color: #f87171; }
+  .empty { font-size: 13px; color: #475569; }
+</style>
+</head>
+<body>
+
+<h1>YT Shorts AI</h1>
+<p class="subtitle">유튜브 영상 → 쇼츠 자동 생성 파이프라인 테스트</p>
+
+<div class="container">
+
+  <!-- 입력 -->
+  <div class="card">
+    <div class="row">
+      <div style="flex:1;min-width:280px">
+        <label>YouTube URL</label>
+        <input id="urlInput" placeholder="https://youtu.be/..." />
+      </div>
+      <div style="width:100px">
+        <label>쇼츠 수</label>
+        <input id="maxShorts" type="number" value="3" min="1" max="10" style="text-align:center" />
+      </div>
+      <button class="btn btn-primary" onclick="runAll()">▶ 전체 실행</button>
+      <button class="btn btn-secondary" onclick="resetAll()">↺ 초기화</button>
+    </div>
+  </div>
+
+  <!-- 파이프라인 스텝 -->
+  <div class="card">
+    <div class="card-title">Pipeline Steps</div>
+    <div class="steps" id="stepsContainer"></div>
+  </div>
+
+  <!-- 상태 + 쇼츠 -->
+  <div class="flex-row">
+    <div class="card flex-1">
+      <div class="card-title">Project</div>
+      <div id="projectInfo"><p class="empty">프로젝트를 생성하세요</p></div>
+    </div>
+    <div class="card flex-2">
+      <div class="card-title">Shorts (<span id="shortsCount">0</span>)</div>
+      <div id="shortsList"><p class="empty">하이라이트 추출 후 표시됩니다</p></div>
+    </div>
+  </div>
+
+  <!-- 에러 -->
+  <div id="errorBar" class="error-bar" style="display:none">
+    <span id="errorMsg"></span>
+    <button onclick="hideError()" style="background:none;border:none;color:#fca5a5;cursor:pointer;font-size:16px">×</button>
+  </div>
+
+  <!-- 로그 -->
+  <div class="card" style="padding:0;overflow:hidden">
+    <div class="log-header">
+      <span class="card-title" style="margin:0">Log <span id="loadingDot" style="display:none;color:#f59e0b">● 처리 중...</span></span>
+      <button class="btn btn-secondary" style="padding:2px 10px;font-size:11px" onclick="clearLog()">Clear</button>
+    </div>
+    <div class="log-body" id="logBody">
+      <div class="log-line log-info">유튜브 URL을 입력하고 실행하세요...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
+const STEPS = [
+  { id:1, label:"프로젝트 생성", ep:"create", desc:"유튜브 URL로 프로젝트 생성" },
+  { id:2, label:"다운로드",     ep:"download", desc:"yt-dlp + 오디오 추출" },
+  { id:3, label:"전사",         ep:"transcribe", desc:"Whisper 음성→텍스트" },
+  { id:4, label:"하이라이트",    ep:"analyze", desc:"LLM 하이라이트 추출" },
+  { id:5, label:"리프레이밍",    ep:"edit", desc:"YOLO + 9:16 크롭" },
+  { id:6, label:"자막",         ep:"subtitle", desc:"ASS 카라오케 자막" },
+  { id:7, label:"인코딩",       ep:"encode", desc:"NVENC 최종 출력" },
+];
+const STATUS_CLR = { pending:"#6b7280", downloading:"#3b82f6", analyzing:"#8b5cf6", editing:"#f59e0b", completed:"#10b981", failed:"#ef4444", queued:"#6b7280", reframing:"#3b82f6", encoding:"#f59e0b" };
+
+let state = { projectId:null, projectStatus:null, shorts:[], activeIdx:0, currentStep:0, loading:false };
+
+// 초기 스텝 버튼 렌더링
+function renderSteps() {
+  const c = document.getElementById("stepsContainer");
+  c.innerHTML = STEPS.map(s => `
+    <button class="step-btn" id="step${s.id}" onclick="runStep(${s.id})" title="${s.desc}">
+      <span class="num">${s.id}</span><span>${s.label}</span>
+    </button>
+  `).join("");
+}
+
+function updateStepUI() {
+  STEPS.forEach(s => {
+    const el = document.getElementById(`step${s.id}`);
+    el.className = `step-btn${state.currentStep >= s.id ? " done" : ""}${state.loading && state.currentStep === s.id - 1 ? " loading" : ""}`;
+    el.querySelector(".num").textContent = state.currentStep >= s.id ? "✓" : s.id;
+    el.disabled = state.loading;
+  });
+}
+
+function renderProject() {
+  const el = document.getElementById("projectInfo");
+  if (!state.projectId) { el.innerHTML = '<p class="empty">프로젝트를 생성하세요</p>'; return; }
+  const c = STATUS_CLR[state.projectStatus] || "#6b7280";
+  el.innerHTML = `
+    <div class="info-row"><span class="info-label">ID</span><code>${state.projectId.slice(0,12)}...</code></div>
+    <div class="info-row"><span class="info-label">상태</span><span class="badge" style="background:${c}22;color:${c}">${state.projectStatus}</span></div>
+  `;
+}
+
+function renderShorts() {
+  document.getElementById("shortsCount").textContent = state.shorts.length;
+  const el = document.getElementById("shortsList");
+  if (!state.shorts.length) { el.innerHTML = '<p class="empty">하이라이트 추출 후 표시됩니다</p>'; return; }
+  el.innerHTML = state.shorts.map((s, i) => {
+    const c = STATUS_CLR[s.status] || "#6b7280";
+    return `<button class="short-btn${i === state.activeIdx ? " active" : ""}" onclick="selectShort(${i})">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="short-num">#${i+1}</span>
+        <span>${s.start_sec?.toFixed(1)}s – ${s.end_sec?.toFixed(1)}s</span>
+        ${s.hook_score != null ? `<span class="score">★ ${s.hook_score.toFixed(2)}</span>` : ""}
+      </div>
+      <span class="badge" style="background:${c}22;color:${c}">${s.status}</span>
+    </button>`;
+  }).join("");
+}
+
+function selectShort(i) { state.activeIdx = i; renderShorts(); }
+
+function addLog(msg, type="info") {
+  const ts = new Date().toLocaleTimeString("ko-KR");
+  const el = document.getElementById("logBody");
+  el.innerHTML += `<div class="log-line log-${type}"><span class="log-ts">${ts}</span>${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog() { document.getElementById("logBody").innerHTML = ""; }
+function showError(msg) { document.getElementById("errorMsg").textContent = "⚠ " + msg; document.getElementById("errorBar").style.display = "flex"; }
+function hideError() { document.getElementById("errorBar").style.display = "none"; }
+function setLoading(v) { state.loading = v; document.getElementById("loadingDot").style.display = v ? "inline" : "none"; updateStepUI(); }
+
+async function apiCall(url, opts={}) {
+  setLoading(true); hideError();
+  try {
+    addLog(`→ ${opts.method||"GET"} ${url}`, "request");
+    const res = await fetch(url, { headers: {"Content-Type":"application/json"}, ...opts });
+    const data = await res.json();
+    if (!res.ok) { const e = data.detail || JSON.stringify(data); addLog(`✗ ${res.status}: ${e}`, "error"); showError(e); return null; }
+    addLog(`✓ ${res.status} OK`, "success");
+    return data;
+  } catch(e) { addLog(`✗ 네트워크 오류: ${e.message}`, "error"); showError(e.message); return null; }
+  finally { setLoading(false); }
+}
+
+async function runStep(id) {
+  if (id === 1) {
+    const url = document.getElementById("urlInput").value.trim();
+    if (!url) { showError("유튜브 URL을 입력하세요"); return; }
+    addLog(`[Step 1] 프로젝트 생성: ${url}`);
+    const d = await apiCall(`${API}/projects/`, { method:"POST", body: JSON.stringify({ youtube_url: url, max_shorts: +document.getElementById("maxShorts").value }) });
+    if (d) { state.projectId = d.id; state.projectStatus = d.status; state.currentStep = 1; addLog(`프로젝트 ID: ${d.id}`, "success"); renderProject(); updateStepUI(); }
+  } else if (id <= 4) {
+    if (!state.projectId) { showError("먼저 프로젝트를 생성하세요"); return; }
+    addLog(`[Step ${id}] ${STEPS[id-1].label} 실행 중...`);
+    const suffix = id === 4 ? `?max_shorts=${document.getElementById("maxShorts").value}` : "";
+    const d = await apiCall(`${API}/projects/${state.projectId}/${STEPS[id-1].ep}${suffix}`, { method:"POST" });
+    if (d) {
+      if (id === 4 && d.items) { state.shorts = d.items; state.activeIdx = 0; addLog(`쇼츠 ${d.total}개 생성됨`, "success"); d.items.forEach((s,i) => addLog(`  #${i+1} ${s.start_sec?.toFixed(1)}-${s.end_sec?.toFixed(1)}s | score: ${s.hook_score}`)); renderShorts(); }
+      state.projectStatus = d.status || state.projectStatus; state.currentStep = id; renderProject(); updateStepUI();
+    }
+  } else {
+    if (!state.shorts.length) { showError("먼저 하이라이트 추출을 실행하세요"); return; }
+    const sid = state.shorts[state.activeIdx]?.id;
+    if (!sid) return;
+    addLog(`[Step ${id}] ${STEPS[id-1].label} — 쇼츠 #${state.activeIdx+1} (${sid.slice(0,8)}...)`);
+    const d = await apiCall(`${API}/shorts/${sid}/${STEPS[id-1].ep}`, { method:"POST" });
+    if (d) { state.shorts = state.shorts.map(s => s.id === sid ? d : s); state.currentStep = id; if (d.status === "completed") addLog(`최종 출력: ${d.output_path}`, "success"); renderShorts(); updateStepUI(); }
+  }
+}
+
+async function runAll() {
+  // Step 1~4: 프로젝트 단위 (1회 실행)
+  for (let i = 1; i <= 4; i++) { await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
+  // Step 5~7: 각 쇼츠별 반복 실행
+  for (let si = 0; si < state.shorts.length; si++) {
+    state.activeIdx = si; renderShorts();
+    addLog(`\n━━━ 쇼츠 #${si+1}/${state.shorts.length} 처리 시작 ━━━`, "info");
+    for (let i = 5; i <= 7; i++) { await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
+  }
+  addLog(`\n✅ 전체 완료! ${state.shorts.length}개 쇼츠 생성`, "success");
+}
+
+function resetAll() {
+  state = { projectId:null, projectStatus:null, shorts:[], activeIdx:0, currentStep:0, loading:false };
+  document.getElementById("urlInput").value = ""; hideError(); clearLog(); renderProject(); renderShorts(); updateStepUI();
+}
+
+renderSteps(); updateStepUI();
+</script>
+</body>
+</html>
