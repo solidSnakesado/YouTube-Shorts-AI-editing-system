@@ -1,14 +1,15 @@
 # 계층: 비즈니스 로직 계층 (Service 헬퍼)
-# 역할: YOLOv8 피사체 추적, 카메라 스무딩, 적응형 리프레이밍 전략,
-#       FFmpeg 크롭 실행 (editing_service.py 300줄 규칙으로 분리)
+# 역할: FFmpeg 클립 추출,  YOLOv8 피사체 추적, 카메라 스무딩, 
+#       적응형 리프레이밍 전략, FFmpeg 크롭 실행 
+#       (editing_service.py 300줄 규칙으로 분리)
 # 의존: 없음 (gpu_manager가 반환한 YOLO 모델을 인자로 받아 사용)
 # MVA 원칙: 인프라 책임(모델 로드/언로드)은 gpu_manager에 위임
-# 흐름: YOLO -> detect_subjects -> smooth_trajectory -> choose_strategy
+# 흐름: extract_clip -> detect_subjects -> smooth_trajectory -> choose_strategy
 #      -> build_crop_timeline -> run_ffmpeg_reframe
-# 8~10일차 신규 파일
+# 8~10일차 신규 / 11~12일차 수정: extract_clip() 추가
 
 """
-리프레이밍 엔진 - 피사체 추적, 스무딩, 적응형 크롭, FFMpeg 실행
+리프레이밍 엔진 -클립 추출, 피사체 추적, 스무딩, 적응형 크롭, FFMpeg 실행
 16:9 가로 영상을 9:16 세로 쇼츠로 변환하는 핵심 로직
 """ 
 
@@ -21,17 +22,55 @@ from loguru import logger
 from app.core.config import settings
 
 # --- 상수 ---
-ASPECT_RATIOS = {"9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1), "4:5": (4, 5)}
-PERSON_CLASS_ID = 0                     # COCO 데이터셋 person 클래스
-STRATEGY_STATIC = "static"              # 고정 모드
-STRATEGY_PAN = "pan"                    # 팬 모드
-STRATEGY_TRACK = "track"                # 추적 모드
-STRATEGY_LETTERBOX = "letterbox"        # 레터박스 모드
-SMOOTHING_ALPHA = 0.15                  # EMA 스무딩 계수 (0에 가까울수록 부드러움)
-MIN_MOVE_THRESHOLD = 5                  # 이 픽셀 이하 이동은 무시 (떨림 방지)
-SCENE_CUT_DISTANCE = 200                # 장면 전환 판단 임계값 (픽셀)
-YOLO_CONF_THRESHOLD = 0.4               # YOLO 감지 신뢰도 임계값
-YOLO_SAMPLE_FPS = 5                     # 초당 샘플링 프레임 수
+ASPECT_RATIOS           = {"9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1), "4:5": (4, 5)}
+PERSON_CLASS_ID         = 0                     # COCO 데이터셋 person 클래스
+STRATEGY_STATIC         = "static"              # 고정 모드
+STRATEGY_PAN            = "pan"                 # 팬 모드
+STRATEGY_TRACK          = "track"               # 추적 모드
+STRATEGY_LETTERBOX      = "letterbox"           # 레터박스 모드
+SMOOTHING_ALPHA         = 0.15                  # EMA 스무딩 계수 (0에 가까울수록 부드러움)
+MIN_MOVE_THRESHOLD      = 5                     # 이 픽셀 이하 이동은 무시 (떨림 방지)
+SCENE_CUT_DISTANCE      = 200                   # 장면 전환 판단 임계값 (픽셀)
+YOLO_CONF_THRESHOLD     = 0.4                   # YOLO 감지 신뢰도 임계값
+YOLO_SAMPLE_FPS         = 5                     # 초당 샘플링 프레임 수
+
+# --------------------------------------------------------------
+# 0. 클립 추출 - 소스에서 start_sec - end_sec 구간만 추출 (11~12일차 신규)
+# --------------------------------------------------------------
+async def extract_clip(source_path: str, clip_path: str, start_sec: float, end_sec: float) -> bool:
+    """
+    FFmpeg로 소스 영상에서 지정 구만만 추출 (시간 트리밍)
+
+    -ss를 -i 앞에 배치: 입력 단계 시크 (키프레임 기반, 빠름)
+    -t duration: 클립 길이 지정
+    -c copy: 재인코딩 없이 스트림 복사 (초고속)
+    -avoid_negetive_ts make_zero: 트리밍 후 타임스탬프 0 기준으로 리셋
+
+    Returns: 성공 여부
+    """
+
+    duration = round(end_sec - start_sec, 3)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(round(start_sec, 3)),
+        "-i", source_path,
+        "-t", str(duration),
+        "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
+        clip_path,
+    ]
+    logger.info(f"클립 추출 | {start_sec:.1f}-{end_sec:.1f}s ({duration:.1f}s) | "
+                f"{Path(source_path).name} -> {Path(clip_path).name}")
+    
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error(f"클립 추출 실패: {stderr.decode()[:500]}")
+        return False
+    
+    logger.info(f"클립 추출 완료: {clip_path}")
+    return True
+    
 
 # --------------------------------------------------------------
 # 1. 피사체 탐지 - YOLOv8로 프레임별 인물 위치 추적
