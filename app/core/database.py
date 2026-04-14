@@ -4,6 +4,12 @@
 #       세션의 생명주기 (생성 -> 커밋 -> 롤백 -> 종료)를 자동으로 관리한다.
 # 의존: app.core.config (DATABASE_URL, is_dev 설정값)
 # MVA 원칙: DB 접근을 한 곳에서 관리하여, DB 기술 교체 시 이 파일만 수정
+#
+# 11~12일차 변경사항:
+#   - get_db(): HTTPException은 커밋 유지, 시스템 에러만 롤백
+#     -> 서비스에서 FAIDED 상태 설정 후 API에서 HTTPException 발생 시
+#        세션이 롤백되어 FAIDED가 DB에 반영되지 않던 버그 수정
+
 """
 데이터베이스 연결 및 세션 관리
 
@@ -21,6 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 # SQLModel: SQLAlchemy + Pydantic 통합 ORM
 # SQLModel.matadata: 모든 테이블 정즤 정보를 담고 있는 메타데이터 객체
 from sqlmodel import SQLModel
+
+# HTTPException: FastAPI의 의도적 에러 으답 (비즈니스 로직 판단)
+# 시스템 장애와 구분하여 세션 커밋/롤백 전략을 분리하기 위해 import
+from fastapi import HTTPException
 
 # 환경 설정에서 DB URL 등을 가져옴
 from app.core.config import settings
@@ -72,18 +82,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     FastAPI의 Depends()와 함께 사용되며, 각 API 요청 마다
     독립적인 DB 세션을 생성하고, 요청 종료 시 자동으로 정리
 
+    커밋/롤백 전략 (11~12일차 수정):
+        - HTTPException: 의도적 비즈니스 에러 -> 커밋 유지
+          (서비스가 FAILED 상태를 설정한 후 APIㅁ가 500을 반환하는 경우,
+           FAIDED 상태가 DB에 반영되어야 함)
+        - 그 외 Exception: 예상치 못한 시스템 장애 -> 롤백
+          (DB 오류, 네트워크 장애 등 데이터 무결성 보호)
+    
     동작 흐름:
         1. 요청 도착 -> 새 세션 생성
         2. yield session -> 엔드포인트에서 세션 사용
         3. 정상 완료 -> commit (변경사항 DB에 반영)
-        4. 예외 발생 -> rollback (변경사항 취소)
-        5. finally -> cloase (세션 자원 해제)
-
-        사용법 (라우터에서):
-            @router.get("/items")
-            async def list_items(db: AsyncSession = Depends(get_db)):
-                result = await db.excute(select(Item))
-                return result.scalars().all()
+        4. HTTPException -> commit (비즈니스 판단 보존) -> 재전파
+        5. 기타 Exception -> rollback (데이터 무결성 보호) -> 재전파
+        6. finally -> cloase (세션 자원 해제)
 
         주의: 이 함수는 레포지토리 계층에 주입되며,
               API 엔드포인트에서 직접 사용하지 않는다 (MVA 계층 규칙)
@@ -92,6 +104,11 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session               # 이 시점에서 엔드포인트 코드가 실행됨
             await session.commit()      # 예외 없으면 변경사항 커밋
+        except HTTPException:
+            # HTTPException은 의도적 비즈니스 판단 (ex> 서비스에서 FAIDED 설정 후 500 반환)
+            # 서비스가 flush()한 변경사항(FAILED 상태 등)을 DB에 반영해야 하므로 커밋
+            await session.commit()
+            raise                       # HTTPException을 상위로 전파 (FastAPI가 응답 생성)
         except Exception:
             await session.rollback()    # 예외 발생 시 모든 변경사항 롤백
             raise                       # 예외를 상위로 전파 (FastAPI가 500 응답 생성)

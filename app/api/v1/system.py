@@ -12,11 +12,11 @@ import subprocess
 
 from fastapi import APIRouter
 
-from app.schemas.api import GPUStatus, SysterStatus
+from app.schemas.api import GPUStatus, SystemStatus
 
 router = APIRouter()
 
-@router.get("/status", response_model=SysterStatus)
+@router.get("/status", response_model=SystemStatus)
 async def system_status():
     """
     시스템 상태 확인
@@ -35,7 +35,7 @@ async def system_status():
     """
     
     gpu = _check_gpu()
-    return SysterStatus(
+    return SystemStatus(
         status="healthy",
         gpu=gpu,
         models_loaded=[],        # 2주차 모델 매니저 구현 시 실제 목록 반환

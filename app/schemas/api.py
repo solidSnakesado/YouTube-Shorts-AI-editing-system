@@ -39,6 +39,7 @@ class ProjectCreate(BaseModel):
         "shorts_duration_sec": 60
     }
     """
+
     youtube_url: HttpUrl                                            # Pydantic이 URL 형식을 자동 검증 (잘못된 URL 이면 422 에러)
     max_shorts: int = Field(default=5, ge=1, le=20)                 # ge=1: 최소 1개, le=20: 최대 20개 -> 범위 밖이면 자동으로 422 Validation Error
     shorts_duration_sec: int = Field(default=60, ge=15, le=180)     # ge=15: 최소: 15초, le=180: 최대 3분
@@ -50,6 +51,7 @@ class ProjectResponse(BaseModel):
     GET /api/v1/projects/{id} 등의 응답 형식
     도메인 모델의 모든 필드를 노출하지 않고, API에 필요한 것만 선별한다
     """
+
     id: str
     youtube_url: str
     title: Optional[str]                # 다운로드 전에는 None
@@ -69,6 +71,7 @@ class ProjectListResponse(BaseModel):
     """
     프로젝트 목록 응답, 페이징 처리를 위한 total 포함.
     """
+
     items: list[ProjectResponse]    # 프로젝트 배열
     total: int                      # 전체 건수 (UI 페이지네이션 용)
 
@@ -82,6 +85,7 @@ class ShortResponse(BaseModel):
 
     하이라이트 구간 정보와 편집 결과를 포함
     """
+
     id: str
     project_id: str
     status: str
@@ -89,10 +93,10 @@ class ShortResponse(BaseModel):
     end_sec: float                      # 끝 시점 (초)
     duration_sec: Optional[float]       # end - start 계산값 (API에서 편의 제공)
     highlight_reason: Optional[str]     # LLM의 선정 사유
-    hook_score: Optional[float]           # 흥미도 점수 (0~1)
+    hook_score: Optional[float]         # 흥미도 점수 (0~1)
     output_path: Optional[str]          # 완성된 파일 경로
     title_suggestion: Optional[str]     # 제안 제목
-    tags_suggestion: Optional[str]       # 제안 태그 (JSON 배열)
+    tags_suggestion: Optional[str]      # 제안 태그 (JSON 배열)
     created_at: datetime                
 
     model_config = {"from_attributes": True}
@@ -101,6 +105,7 @@ class ShortsListResponse(BaseModel):
     """
     쇼츠 목록 응답
     """
+
     items: list[ShortResponse]
     total: int
 
@@ -121,7 +126,7 @@ class GPUStatus(BaseModel):
     vram_total_mb: Optional[int] = None     # 전체 VRAM (MB)
     vram_used_mb: Optional[int] = None      # 사용 중인 VRAM (MB)
 
-class SysterStatus(BaseModel):
+class SystemStatus(BaseModel):
     """
     시스템 상태 응답
 
@@ -130,4 +135,4 @@ class SysterStatus(BaseModel):
     """
     status: str                     # "healthy"
     gpu: GPUStatus                  # GPU 상세 정보
-    models_loaded: list[str] = []    # 현재 GPU에 로드된 모델 목록 (2주차 구현)
+    models_loaded: list[str] = []   # 현재 GPU에 로드된 모델 목록 (2주차 구현)
