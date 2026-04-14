@@ -10,31 +10,59 @@ wheels/
 .venv
 
 # --- AI & Media Processing (대용량 파일 방지) ---
-# 로컬 GPU 분석 결과물 및 편집된 쇼츠 영상
+# 다운로드된 원본 영상 + 중간 처리 파일
+temp/
+
+# 완성된 쇼츠 영상
 outputs/
+
+# 영상/오디오 파일
 *.mp4
 *.mkv
 *.avi
 *.mov
+*.wav
+*.mp3
+*.flac
 
-# AI 모델 가중치 (WAN 2.1, SDXL 등) 및 체크포인트
+# 자막 파일
+*.ass
+*.srt
+
+# AI 모델 가중치 (Gemma 4, Whisper, YOLO 등)
 models/
 weights/
 *.pth
 *.bin
 *.onnx
 *.ckpt
+*.gguf
+*.safetensors
+
+# --- Database & Logs ---
+# SQLite 데이터베이스
+data/
+*.db
+*.db-journal
+
+# 로그 파일
+logs/
+*.log
 
 # --- Environment & Security (보안 필수) ---
-# YouTube API Key나 DB 접속 정보가 담긴 환경 변수
+# API Key, DB 접속 정보 등 환경 변수
 .env
 .env.local
 secrets.json
 
+# --- HuggingFace 캐시 ---
+.huggingface/
+hf_transfer/
+
 # --- OS & IDE (작업 환경 최적화) ---
-# macOS (Mac Studio 사용 시 생성)
+# macOS
 .DS_Store
-# Windows (WSL2와 혼용 시 생성)
+# Windows (WSL2 혼용 시)
 Thumbs.db
 desktop.ini
 

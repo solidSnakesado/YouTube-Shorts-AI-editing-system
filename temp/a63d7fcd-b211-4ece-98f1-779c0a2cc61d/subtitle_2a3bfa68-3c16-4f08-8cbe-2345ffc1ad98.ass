@@ -1,0 +1,32 @@
+[Script Info]
+Title: YT Shorts AI Subtitles
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Noto Sans CJK KR,18,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,20,20,120,1
+Style: Highlight,Noto Sans CJK KR,22,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,20,20,120,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.05,0:05:39.68,Default,,0,0,0,,{\c&H0000FFFF\fscx110\fscy110}this{\r} is how we
+Dialogue: 0,0:05:39.68,0:05:40.50,Default,,0,0,0,,this {\c&H0000FFFF\fscx110\fscy110}is{\r} how we
+Dialogue: 0,0:05:40.50,0:05:40.62,Default,,0,0,0,,this is {\c&H0000FFFF\fscx110\fscy110}how{\r} we
+Dialogue: 0,0:05:40.62,0:05:40.90,Default,,0,0,0,,this is how {\c&H0000FFFF\fscx110\fscy110}we{\r}
+Dialogue: 0,0:05:40.90,0:05:41.36,Default,,0,0,0,,{\c&H0000FFFF\fscx110\fscy110}say{\r} good job times
+Dialogue: 0,0:05:41.36,0:05:41.86,Default,,0,0,0,,say {\c&H0000FFFF\fscx110\fscy110}good{\r} job times
+Dialogue: 0,0:05:41.86,0:05:42.76,Default,,0,0,0,,say good {\c&H0000FFFF\fscx110\fscy110}job{\r} times
+Dialogue: 0,0:05:42.76,0:05:44.06,Default,,0,0,0,,say good job {\c&H0000FFFF\fscx110\fscy110}times{\r}
+Dialogue: 0,0:06:02.87,0:06:03.11,Default,,0,0,0,,{\c&H0000FFFF\fscx110\fscy110}up{\r} kiddo show me
+Dialogue: 0,0:06:03.11,0:06:04.25,Default,,0,0,0,,up {\c&H0000FFFF\fscx110\fscy110}kiddo{\r} show me
+Dialogue: 0,0:06:04.25,0:06:04.43,Default,,0,0,0,,up kiddo {\c&H0000FFFF\fscx110\fscy110}show{\r} me
+Dialogue: 0,0:06:04.43,0:06:04.53,Default,,0,0,0,,up kiddo show {\c&H0000FFFF\fscx110\fscy110}me{\r}
+Dialogue: 0,0:06:04.53,0:06:04.65,Default,,0,0,0,,{\c&H0000FFFF\fscx110\fscy110}what{\r} you were working
+Dialogue: 0,0:06:04.65,0:06:04.79,Default,,0,0,0,,what {\c&H0000FFFF\fscx110\fscy110}you{\r} were working
+Dialogue: 0,0:06:04.79,0:06:04.89,Default,,0,0,0,,what you {\c&H0000FFFF\fscx110\fscy110}were{\r} working
+Dialogue: 0,0:06:04.89,0:06:05.09,Default,,0,0,0,,what you were {\c&H0000FFFF\fscx110\fscy110}working{\r}
+Dialogue: 0,0:06:05.09,0:06:05.35,Default,,0,0,0,,{\c&H0000FFFF\fscx110\fscy110}on{\r}
