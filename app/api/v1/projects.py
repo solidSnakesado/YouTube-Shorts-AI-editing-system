@@ -45,13 +45,12 @@ async def create_project(
     유투브 URL로 새 프로젝트 생성
 
     POST /api/v1/projects/
-    Body: {"youtube_url": "https://...", "max_shorts": 5, "short_duration_sec": 60}
+    Body: {"youtube_url": "https://...", "max_shorts": 5}
     Response: 201 Created + ProjectResponse
 
     body는 ProjectCreate 스키마로 자동 검증됨:
         - youtube_url이 유효한 URL 인지
         - max_shorts가 1~20범위 인지
-        - shorts_duration_sec이 15~180 범위인지
     -> 검증 실패 시 FastAPI가 자동으로 422 Validation Error 반환
     """
     
@@ -174,11 +173,12 @@ async def analyze_video(
     video_svc: VideoService = Depends(get_video_service),
 ):
     """
-    하이라이트 구간 추출 (LLM 기반) - 6~7일차 구현 완료
+    하이라이트 구간 추출 (LLM 기반) - 6~7일차 구현 / 13일차: LLM 자동 길이 판단
 
     POST /api/v1/projects/{id}/analyze?max_shorts=5
 
     파이프라인에서의 위치: download -> transcribe -> **analyze** 
+    쇼츠 길이는 LLM이 콘텐츠에 맞게 10~120초 범위에서 자동 결정
 
     전제 조건:
         - 전사가 완료되어 project.transcript_json이 존재해야 함

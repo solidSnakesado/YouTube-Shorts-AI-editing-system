@@ -4,6 +4,7 @@
 # MVA 원칙: 인프라 책임(모델 로드/언로드)은 gpu_manager에 위임
 # 흐름: transcript_json -> build_highlight_prompt -> call_llm -> parse_highlights
 # 6~7일차 신규 / 11~12일차: create_time_based_highlight 추가
+# 13일차: LLM 자동 길이 판단 - duration_sec 고정값 제거, 10~120초 범위 자동 결정
 
 """LLM 하이라이트 추출기 - 프롬프트 생성, LLM 호출, 응답 파싱"""
 
@@ -13,28 +14,23 @@ from typing import Any
 
 from loguru import logger
 
+# 쇼츠 길이 제한 상수 - LLM이 자동 판단하되, 이 범위를 벗어나면 검증에서 보정
+MIN_DURATION_SEC = 10       # 최소 쇼츠 길이 (미만 시 제거)
+MAX_DURATION_SEC = 120      # 최대 쇼츠 길이 (초과 시 잘라내기)
+
 # --------------------------------------------------------------
 # 프롬프트 생성
 # --------------------------------------------------------------
 
-def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5, duration_sec: int = 60) -> str:
+def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5) -> str:
     """
     전사 데이터를 LLM 프롬프트로 변환
+    13일차 변경: duration_sec 고정값 제거 -> LLM이 콘텐츠에 맞게 최적 길이를 자동 결정
+    프롬프트레 길이 가이드라인을 포함하여 10~120초 범위에서 자체 판단하도록 유도
 
-    각 세그먼트를 [시작-끝초] 텍스트 형식으로 포맷팅하고
-    LLM에게 흥미 구간 선별을 요청하는 프롬프트를 생성
-
-    프롬프트 설계 의도:
-        - 역할 부여: "유투브 쇼츠 편집 전문가"
-        - 영상 정보 제공: 총 길이, 언어
-        - 선별 기준 명시: 훅, 맥락 완결, 감정 반응
-        - 출력 형식 강제: JSON only (다른 텍스트 금지)
-        - 시간 범위 제한: 0초 - total_duration초
     Args:
         transcript_data: Whisper 전사 결과 dict (segments 포함)
         max_shorts: 추출할 최대 쇼츠 수
-        duration_sec: 각 쇼츠의 목표 길이 (초)
-
     Returns:
         LLM에 전달할 프롬프트 문자열
     """
@@ -59,8 +55,9 @@ def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5, duration_
         - 총 길이: {total_duration:.0f}초
         - 언어: {language}
     선별 기준:
-        - 각 클립은 약 {duration_sec}초 내외로 구성
         - 최대 {max_shorts}개 클립 선별
+        - 각 클립의 최적 길이를 콘텐츠에 맞게 {MIN_DURATION_SEC}~{MAX_DURATION_SEC}초 범위에서 자체 판단
+          (임펙트 장면: 10~15초 / 핵심 요약: 15~30초 / 스토리: 30~60초 / 심층설명: 60~120초)
         - 시청자의 관심을 끌수 있는 훅(Hook)이 있는 구간 우선
         - 맥락이 완결되는 구간 (문장 중간에 잘리지 않도록)
         - 감정적 반응을 유발하는 부분 (놀라움, 유머, 감동, 인사이트)
@@ -89,7 +86,6 @@ def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5, duration_
 def call_llm(llm_handle: dict, prompt: str) -> str:
     """
     LLM 호출 (OpenAI API / 로컬 Gemma 4 GGUF 분기)
-
     llm_handle의 "type"키로 분기:
         "openai"    -> OpenAI GPT-4o-mini API 호출
         "local"     -> llama-cpp-python으로 로컬 Gemma 4 E4B 호출
@@ -137,7 +133,6 @@ def _call_openai(client: Any, prompt: str) -> str:
 def _call_local(model: Any, prompt: str) -> str:
     """
     로컬 Gemma 4 E4B 호출 (llama-cpp-python)
-
     Gemma 4 공식 권장 샘플링 파라미터:
         temperature=1.0, top_p=0.95, top_k=64, repeat_penalty=1.0
     하이라이트 추출은 정확한 JSON이 필요하므로:
@@ -234,6 +229,7 @@ def _validate_highlight(h: dict, total_duration: float) -> dict | None:
     개별 하이라이트 검증 및 정규화
     검증: 시간 순서, 영상 범위 클리핑, 최소 5초, hook_score 0~1 클리핑
     Returns: 유효한 dict 또는 None
+    13일차 변경: MIN/MAX_DURATION_SEC 상수 적용, 초과 시 잘라내기 추가
     """
 
     # 시간 값 파싱
@@ -251,8 +247,12 @@ def _validate_highlight(h: dict, total_duration: float) -> dict | None:
     start = max(0.0, start)
     end = min(total_duration, end)
 
-    # 최소 길이 검증 (5초 미만이면 쇼츠로 부적합)
-    if end - start < 5.0:
+    # 최대 길이 초과 시 잘라내기 (13일차 추가)
+    if end - start > MAX_DURATION_SEC:
+        end = start + MAX_DURATION_SEC
+
+    # 최소 길이 검증
+    if end - start < MIN_DURATION_SEC:
         return None
     
     # hook_score 클리핑 (0.0 ~ 1.0)
@@ -271,23 +271,24 @@ def _validate_highlight(h: dict, total_duration: float) -> dict | None:
     }
 
 # --------------------------------------------------------------
-# 음성 없는 영상용 시간 기반 풀백 (11~12일차 추가)
+# 음성 없는 영상용 시간 기반 풀백 (11~12일차 추가 / 13일차: duration_sec 제거)
 # --------------------------------------------------------------
-def create_time_based_highlights(total_duration: float, max_shorts: int, duration_sec: int) -> list[dict]:
+def create_time_based_highlights(total_duration: float, max_shorts: int) -> list[dict]:
     """
     음성이 없는 영상에서 시간 기간 균등 분할 하이라이트 생성
-    LLM 호출 없이 영상을 duration_sec 길이로 균등 분할
+    LLM 호출 없이 영상을 duration_sec 길이로 균등 분할 (기본 60초 간격, MAX_DURATION_SEC 이내)
     """
 
     if total_duration <= 0:
         return []
     
+    default_dur = min(60, MAX_DURATION_SEC) # 기본 구간 길이
+    interval = max(default_dur, total_duration / max_shorts)
     highlight = []
-    interval = max(duration_sec, total_duration / max_shorts)
     for i in range(max_shorts):
         start = round(i * interval, 3)
-        end = round(min(start + duration_sec, total_duration), 3)
-        if end - start < 5.0 or start >= total_duration:
+        end = round(min(start + default_dur, total_duration), 3)
+        if end - start < MIN_DURATION_SEC or start >= total_duration:
             break
         highlight.append({
             "start_sec": start, "end_sec": end,

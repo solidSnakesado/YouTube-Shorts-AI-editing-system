@@ -1,31 +1,10 @@
 # 계층: 테스트 (통합)
-# 역할: LLM 하이라이트 추출 파이프라인 검증
-#       실제 LLM/GPU를 사용하지 않고, 외부 의존성을 모킹하여 
-#       하이라이트 추출 -> Shorts 엔티티 생성 -> DB 저장 -> 상태 전환 검증
-# 의존: app.main, app.core.database, app.services
-#
-# 테스트 실행 방법:
-#   uv run pytest tests/integration/test_highlights.py -v
-#
-# 이 테스트가 검증하는 것:
-#   1. 전사 데이터가 있는 프로젝트에서 하이라이트 추출 성공
-#   2. LLM 응답이 Shorts 엔티티로 변환되어 DB에 저장됨
-#   3. 프로젝트 상태가 ANALYZING -> EDITING으로 전환됨
-#   4. 전사 데이터 없이 하이라이트 추출 시 500 에러
-#   5. LLM 응답 파싱 실패 시 500 + FAILED 상태
-#   6. 전체 E2E: 생성 -> 다운로드 -> 전사 -> 하이라이트 추출
-#
-# 모킹 경로 규칙 (핵심):
-#   from X import Y 구문 사용 시 patch("사용모듈.Y")로 패치
-#   patch("app.services.analysis_service.load_llm")     - 올바름
-#   patch("app.core.gpu_manager.load_llm")              - 효과 없음
-#
-# 6~7일차 신규 파일
+# 역할: LLM 하이라이트 추출 파이프라인 검증 (모킹 기반)
+# 모킹 규칙: from X import Y -> patch("사용모듈.Y")
+# 6~7일차 신규 / 13일차: 자동 길이 판단 테스트 추가
 
 """
-LLM 하이라이트 추출 통합 테스트
-
-전사 -> 하이라이트 추출 -> Shorts 생성 흐름 검증
+LLM 하이라이트 추출 통합 테스트 - 전사 -> 하이라이트 추출 -> Shorts 생성 흐름 검증
 """
 
 import json
@@ -36,6 +15,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.services.llm_highlight_extractor import parse_highlights, MIN_DURATION_SEC, MAX_DURATION_SEC
 
 @pytest_asyncio.fixture
 async def client():
@@ -117,16 +97,16 @@ async def _transcribe_project(client, pid: str) -> dict:
     assert resp.status_code == 200
     return resp.json()
 
-# LLM이 반환할 모킹 응답 (정상 JSON)
+# LLM이 반환할 모킹 응답 - 13일차: 다양한 길이 (LLM이 자동 판단 시뮬레이션)
 MOCK_LLM_RESPONSE = json.dumps({
     "highlights": [
         {
-            "start_sec": 10.0, "end_sec": 70.0, "hook_score": 0.92,
+            "start_sec": 10.0, "end_sec": 55.0, "hook_score": 0.92,
             "reason": "놀라운 도입부", "title_suggestion": "놀라운 사실",
             "tags": ["정보"],
         },
         {
-            "start_sec": 120.0, "end_sec": 180.0, "hook_score": 0.85,
+            "start_sec": 120.0, "end_sec": 145.0, "hook_score": 0.85,
             "reason": "핵심 인사이트", "title_suggestion": "이것만 알면",
             "tags": ["핵심"],
         },
@@ -272,3 +252,37 @@ async def test_llm_pipeline_create_to_analyze(client):
     final = await client.get(f"/api/v1/projects/{p['id']}")
     assert final.json()["status"] == "editing"
     assert final.json()["shorts_count"] >= 1         # 쇼츠가 생성되어 카운트 반영됨
+
+# --------------------------------------------------------------
+# 테스트: LLM 자동 길이 판단 검증 (13일차 추가)
+# --------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_audio_duration_validate_min_max():
+    """
+    parse_highlights가 MIN/MAX_DURATION_SEC 범위를 올바르게 적용하는 지 검증
+        - 10초 미만: 제거
+        - 120초 초과: 120초로 잘라내기
+        - 정상 범위: 그대로 유지
+    """
+
+    llm_response = json.dumps({"highlights": [
+        {"start_sec": 0, "end_sec": 5, "hook_score": 0.9, "reason": "너무 짧음", "title_suggestion": "짧은", "tags": []},
+        {"start_sec": 10, "end_sec": 200, "hook_score": 0.8, "reason": "너무 긴 구간", "title_suggestion": "긴", "tags": []},
+        {"start_sec": 50, "end_sec": 90, "hook_score": 0.7, "reason": "적절한 구간", "title_suggestion": "적절", "tags": []},
+    ]})
+
+    result = parse_highlights(llm_response, total_duration=300.0, max_shorts=5)
+
+    # 5초짜리는 MIN_DURATION_SEC(10) 미만이므로 제거됨
+    assert all(r["end_sec"] - r["start_sec"] >= MIN_DURATION_SEC for r in result)
+
+    # 190초짜리는 MAX_DURATION_SEC(120)로 짤림 -> end_sec = 10 + 120 = 130
+    long_clip = [r for r in result if r["start_sec"] == 10.0]
+    assert len(long_clip) == 1
+    assert long_clip[0]["end_sec"] == 10.0 + MAX_DURATION_SEC
+
+    # 40초짜리는 그대로 유지
+    normal_clip = [r for r in result if r["start_sec"] == 50.0]
+    assert len(normal_clip) == 1
+    assert normal_clip[0]["end_sec"] == 90.0

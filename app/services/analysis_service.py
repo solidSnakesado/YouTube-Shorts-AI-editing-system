@@ -3,6 +3,7 @@
 # 의존: ProjectRepository, ShortRepository (DI로 주입 받음), gpu_manager (인프라)
 # MVA 원칙: 서비스 = 순수 비즈니스 로직, GPU 관리는 인프라 계층에 위임
 # 6~7일차 : LLM 하이라이트 구현 / 11~12일차: 음성 미감지 시 시간 기반 분할 추간
+# 13일차: duration_dec 파라미터 제거 - LLM 자동 길이 판단으로 전환
 
 """
 분석 서비스
@@ -100,9 +101,11 @@ class AnalysisService:
     # 공개 메서드: 하이라이트 추출 (6~7일차)
     # --------------------------------------------------------------
 
-    async def extract_highlights(self, project_id: str, max_shorts: int = 5, duration_sec: int = 60) -> list[Shorts]:
+    async def extract_highlights(self, project_id: str, max_shorts: int = 5) -> list[Shorts]:
         """
         LLM 기반 하이라이트 구간 추출,
+
+        13일차 변경: duration_sec 파라미터 제거 - LLM 이 콘텐츠에 맞게 자동 판단
 
         흐름:
             1. 프롬프트 조회 + 전사 데이터 검증
@@ -114,7 +117,6 @@ class AnalysisService:
         Args:
             project_id: 분석할 프로젝트 ID
             max_shorts: 추출할 최대 쇼츠 수
-            duration_sec: 각 쇼츠의 목표 길이 (초)
         Returns:
             생성된 Shorts 엔티티 목록 (실패 시 빈 리스트)
         """
@@ -137,12 +139,12 @@ class AnalysisService:
             has_speech = any(seg.get("text", "").strip() for seg in transcript_data.get("segments", []))
             if has_speech:
                 highlights = await asyncio.get_event_loop().run_in_executor(
-                    None, self._run_highlight_extraction, transcript_data, max_shorts, duration_sec)
+                    None, self._run_highlight_extraction, transcript_data, max_shorts)
             else:
                 # 음성 없는 영상 -> 시간 기반 균등 분할 (LLM 호출 생략)
                 logger.info(f"음성 미감지 - 시간 기반 분할: {project_id}")
                 total_dur = transcript_data.get("duration_sec", 0)
-                highlights = create_time_based_highlights(total_dur, max_shorts, duration_sec)
+                highlights = create_time_based_highlights(total_dur, max_shorts)
             
             if not highlights:
                 await self.project_repo.update_status(project_id, ProjectStatus.FAILED, "LLM이 하이라이트를 추출하지 못했습니다.")
@@ -255,7 +257,7 @@ class AnalysisService:
             logger.error(f"전사 JSON 파싱 실패: {e}")
             return None
 
-    def _run_highlight_extraction(self, transcript_data: dict, max_shorts: int, duration_sec: int) -> list[dict]:
+    def _run_highlight_extraction(self, transcript_data: dict, max_shorts: int) -> list[dict]:
         """
         LLM 하이라이트 추출 실행 (동기 - 스레드 풀에서 호출)
         흐름: LLM 로드 -> 프롬프트 생성 -> LLM 호출 -> 응답 파싱
@@ -263,7 +265,7 @@ class AnalysisService:
         """
 
         self._llm_handle = load_llm()       # gpu_manager에서 로드
-        prompt = build_highlight_prompt(transcript_data, max_shorts, duration_sec)
+        prompt = build_highlight_prompt(transcript_data, max_shorts)
         response_text = call_llm(self._llm_handle, prompt)
         total_duration = transcript_data.get("duration_sec", 0)
         return parse_highlights(response_text, total_duration, max_shorts)

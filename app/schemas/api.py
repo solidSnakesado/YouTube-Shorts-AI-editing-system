@@ -30,19 +30,11 @@ from pydantic import BaseModel, Field, HttpUrl
 class ProjectCreate(BaseModel):
     """
     프로젝트 생성 요청 스키마
-
-    클라이언트가 POST /api/v1/projects/ 에 보내는 JSON 형식
-    ex>
-    {
-        "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        "max_shorts": 5,
-        "shorts_duration_sec": 60
-    }
+    13일차 변경: shorts_duration_sec 제거 - LLM이 콘텐트레 맞게 자동 판단
     """
 
     youtube_url: HttpUrl                                            # Pydantic이 URL 형식을 자동 검증 (잘못된 URL 이면 422 에러)
     max_shorts: int = Field(default=5, ge=1, le=20)                 # ge=1: 최소 1개, le=20: 최대 20개 -> 범위 밖이면 자동으로 422 Validation Error
-    shorts_duration_sec: int = Field(default=60, ge=15, le=180)     # ge=15: 최소: 15초, le=180: 최대 3분
 
 class ProjectResponse(BaseModel):
     """
