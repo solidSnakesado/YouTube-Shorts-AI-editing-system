@@ -70,3 +70,5 @@ desktop.ini
 .vscode/
 .idea/
 # ipynb 예외 — MVA 아키텍처 문서는 유지
+*.pt
+*.pt
