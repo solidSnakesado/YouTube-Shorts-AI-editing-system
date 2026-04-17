@@ -1,9 +1,10 @@
 # 계층: 비즈니스 로직 계층 (Service)
-# 역할: 음성 인식 (ASR) + LLM 기반 하이라이트 추출 + 음성 없는 영상 풀백
+# 역할: 음성 인식 (ASR) + LLM 기반 하이라이트 추출 + 음성 없는 영상 폴백
 # 의존: ProjectRepository, ShortRepository (DI로 주입 받음), gpu_manager (인프라)
 # MVA 원칙: 서비스 = 순수 비즈니스 로직, GPU 관리는 인프라 계층에 위임
-# 6~7일차 : LLM 하이라이트 구현 / 11~12일차: 음성 미감지 시 시간 기반 분할 추간
-# 13일차: duration_dec 파라미터 제거 - LLM 자동 길이 판단으로 전환
+# 6~7일차 : LLM 하이라이트 구현 / 11~12일차: 음성 미감지 시 시간 기반 분할 추가
+# 13일차: duration_sec 파라미터 제거 - LLM 자동 길이 판단으로 전환
+# 14~15일차: VLM 멀티모달 분기 추가 - 영상 프레임 + 텍스트 통합 분석
 
 """
 분석 서비스
@@ -29,17 +30,14 @@ from app.repositories.shorts_repository import ShortsRepository
 # LLM 프롬프트/호출.파싱 헬퍼 (300줄 규칙으로 분리된 모듈)
 from app.services.llm_highlight_extractor import (build_highlight_prompt, call_llm, parse_highlights, create_time_based_highlights)
 
+# VLM 멀티모달 분석 (14~15일차): 영상 프레임 + 텍스트 통합 하이라이트 추출
+from app.services.vlm_client import is_vlm_available, run_vlm_analysis
+
 class AnalysisService:
     """
-    분석 서비스
-    책임:
-        1. Whisper로 영상 음성을 텍스트로 전사 (ASR) - 구현 완료
-        2. LLM으로 전사 텍스트에서 하이라이트 구간 추출 - 6~7일차 구현 예정
-        3. 추출된 구간을 Shorts 엔티티로 DB에 저장
-
-        VRAM 관리:
-            - gpu_manager 모듈에 위임, 전사 완료 후 Whisper 언로드 -> LLM 로드 가능
-            - 하이라이트 추출 완료 후 LLM 언로드 -> 다음 단계(YOLO) 로드 가능
+    분석 서비스 - Whisper 전사 + LLM/VLM 하이라이트 추출
+    VRAM 관리: gpu_manager에 위임, 모델 간 순차 스위칭 (Whisper -> LLM -> YOLO)
+    14~15일차: VLM 멀티 모달 분석 분기 추가 (영상 + 텍스트 통합)
     """
     
     def __init__(self, project_repo: ProjectRepository, shorts_repo: ShortsRepository):
@@ -56,9 +54,7 @@ class AnalysisService:
     async def transcribe(self, project_id: str) -> Optional[Project]:
         """
         Whisper를 사용한 음성 전사
-
         흐름: 프로젝트 조회 -> 오디오 검증 -> 전사 실행 -> JSON 저장 -> 모델 언로드
-
         Args:
             project_id: 전사할 프로젝트 ID
         Returns:
@@ -104,9 +100,7 @@ class AnalysisService:
     async def extract_highlights(self, project_id: str, max_shorts: int = 5) -> list[Shorts]:
         """
         LLM 기반 하이라이트 구간 추출,
-
         13일차 변경: duration_sec 파라미터 제거 - LLM 이 콘텐츠에 맞게 자동 판단
-
         흐름:
             1. 프롬프트 조회 + 전사 데이터 검증
             2. LLM 로드 (Gemma 4 E4B 또는 OpenAI API)
@@ -137,11 +131,17 @@ class AnalysisService:
         try:
             # 전사에 음성이 있는지 확인
             has_speech = any(seg.get("text", "").strip() for seg in transcript_data.get("segments", []))
-            if has_speech:
+
+            # VLM 우선: 영상 프레임 + 텍스트 통합 분석 (14~15일차)
+            # VLM은 음성 유무와 무관하게 시각 + 언어 기반 분석 가능
+            if is_vlm_available() and project.source_path:
+                highlights = await run_vlm_analysis(project.source_path, transcript_data, max_shorts)
+            elif has_speech:
+                # VLM 불가 시 텍스트 전용 LLM 폴백 (기존 6~7일차 로직)
                 highlights = await asyncio.get_event_loop().run_in_executor(
                     None, self._run_highlight_extraction, transcript_data, max_shorts)
             else:
-                # 음성 없는 영상 -> 시간 기반 균등 분할 (LLM 호출 생략)
+                # 음성 없는 영상 + VLM 불가 -> 시간 기반 균등 분할
                 logger.info(f"음성 미감지 - 시간 기반 분할: {project_id}")
                 total_dur = transcript_data.get("duration_sec", 0)
                 highlights = create_time_based_highlights(total_dur, max_shorts)

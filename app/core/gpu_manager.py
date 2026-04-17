@@ -16,6 +16,11 @@
 #
 # 8~10일차 변경사항:
 #   - load_yolo() 추가: YOLOv8n GPU 로드 (리프레이밍용 객체 탐지)
+#
+# 14일차 변경사항:
+#   - VLM 서버 관리는 llm_server.py로 분리 (300줄 규칙)
+#   - 기존 load_llm()은 텍스트 전용 분석에서 계속 사용
+#   - VLM 멀티모달 분석 시에는 llm_server.start_llm_server(multimodal=True) 사용 
 
 """
 GPU 모델 관리자
@@ -190,7 +195,7 @@ def load_yolo() -> Any:
         ultralytics.YOLO 인스턴스 (GPU에 로드됨)
     """
 
-    # 지연 임프트: ultralytics 미설치 환경에서 다른 기능 사용 가능
+    # 지연 임포트: ultralytics 미설치 환경에서 다른 기능 사용 가능
     from ultralytics import YOLO
 
     model_name = settings.YOLO_MODEL        # 기본값: "yolov8n.pt"

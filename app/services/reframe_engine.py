@@ -9,7 +9,7 @@
 # 8~10일차 신규 / 11~12일차 수정: extract_clip() 추가
 
 """
-리프레이밍 엔진 -클립 추출, 피사체 추적, 스무딩, 적응형 크롭, FFMpeg 실행
+리프레이밍 엔진 -클립 추출, 피사체 추적, 스무딩, 적응형 크롭, FFmpeg 실행
 16:9 가로 영상을 9:16 세로 쇼츠로 변환하는 핵심 로직
 """ 
 
@@ -39,12 +39,12 @@ YOLO_SAMPLE_FPS         = 5                     # 초당 샘플링 프레임 수
 # --------------------------------------------------------------
 async def extract_clip(source_path: str, clip_path: str, start_sec: float, end_sec: float) -> bool:
     """
-    FFmpeg로 소스 영상에서 지정 구만만 추출 (시간 트리밍)
+    FFmpeg로 소스 영상에서 지정 구간만 추출 (시간 트리밍)
 
     -ss를 -i 앞에 배치: 입력 단계 시크 (키프레임 기반, 빠름)
     -t duration: 클립 길이 지정
     -c copy: 재인코딩 없이 스트림 복사 (초고속)
-    -avoid_negetive_ts make_zero: 트리밍 후 타임스탬프 0 기준으로 리셋
+    -avoid_negative_ts make_zero: 트리밍 후 타임스탬프 0 기준으로 리셋
 
     Returns: 성공 여부
     """
@@ -113,7 +113,7 @@ def detect_subjects(yolo_model: Any, video_path: str, sample_fps: int = YOLO_SAM
     return detections
 
 # --------------------------------------------------------------
-# 2. 카메라 이동 스무딩 - EMA(Exponential Moveing Averge) 필터
+# 2. 카메라 이동 스무딩 - EMA(Exponential Moveing Average) 필터
 # --------------------------------------------------------------
 def smooth_trajectory(detections: list[dict], alpha: float = SMOOTHING_ALPHA) -> list[dict]:
     """
