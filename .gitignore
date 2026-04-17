@@ -69,6 +69,25 @@ desktop.ini
 # IDE Settings (개인 설정 제외)
 .vscode/
 .idea/
-# ipynb 예외 — MVA 아키텍처 문서는 유지
+
+# uv 패키지 관리자 캐시/잠금
+.uv_cache/
+
+# PyTorch / CUDA 캐시
+torch_extensions/
 *.pt
-*.pt
+
+# Whisper 모델 캐시 (faster-whisper 자동 다운로드)
+.cache/
+
+# YOLO 런타임 생성 파일
+runs/
+
+# Jupyter (개발 중 사용 시)
+.ipynb_checkpoints/
+*.ipynb
+
+# pytest 캐시
+.pytest_cache/
+htmlcov/
+.coverage
