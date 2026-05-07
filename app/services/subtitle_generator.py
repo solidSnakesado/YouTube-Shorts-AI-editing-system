@@ -6,6 +6,12 @@
 # 흐름: transcript -> extract_words_for_range -> build_add_header
 #       -> build_ass_events -> write_ass_file -> run_ffmpeg_subtitle -> run_ffmpeg_encode
 # 11~12일차 신규파일
+# 17일차 변경사항:
+#   - FONT_SIZE: 18 -> 52 (1080x1920 가독성 확보)
+#   - FONT_SIZE_HL: 22 -> 62 (강조 단어 상대 강조)
+#   - MARGIN_V: 120 -> 180 (하단 여백 확대)
+#   - Outline: 3 -> 4, Shadow: 1 -> 2 (외곽선/그림자 강화)
+#   - verify_font() 함수 신규 추가 (fc-match 기반 폰트 존재 검증)
 
 """
 ASS 자막 생성기 - Whisper 타임스탬프 기반 동적 자막, 단어 강조, FFmpeg 합성/인코딩
@@ -17,21 +23,52 @@ ASS(Advenced Substation Alpha) 포맷 사용 이유:
 """
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 from loguru import logger
 from app.core.config import settings
 
 # --- ASS 스타일 상수 ---
-FONT_NAME = "Noto Sans CJK KR"      # 한국어 지원 무료 폰트, 없으면 Arial 풀백
-FONT_SIZE = 18                      # 기본 폰트 크기 (1080x1920)
-FONT_SIZE_HL = 22                   # 강조 단어 폰트 크기
+FONT_NAME = "Noto Sans CJK KR"      # 한국어 지원 무료 폰트, 시스템 설치 필수
+FONT_SIZE = 52                      # 기본 폰트 크기 (1080x1920), 17일차: 18 -> 52
+FONT_SIZE_HL = 62                   # 강조 단어 폰트 크기, 17일차: 22 -> 62
 CLR_PRIMARY = "&H00FFFFFF"          # 기본: 흰색 (ASS BGR 형식)
 CLR_HIGHLIGHT = "&H0000FFFF"        # 강조: 노란색 
 CLR_OUTLINE = "&H00000000"          # 외곽선: 검은색 
 CLR_SHADOW = "&H80000000"           # 그림자: 반투명 검은색 
-MARGIN_V = 120                      # 하단 여백 (픽셀)
+MARGIN_V = 180                      # 하단 여백 (픽셀), 17일차: 120 -> 180 (하단 여백)
+OUTLINE_WIDTH = 4                   # 17일차: 3 -> 4 (외곽선 두께)
+SHADOW_DEPTH = 2                    # 17일차: 1 -> 2 (그림자 깊이)
 WORDS_PER_GROUP = 4                 # 한 번에 표시할 단어 수
+
+# --------------------------------------------------------------
+# 0. 폰트 존재 검증 (17일차 신규)
+# --------------------------------------------------------------
+def verify_font(font_name: str = FONT_NAME) -> bool:
+    """
+    시스템에 지정 폰트가 설치되어 있는지 fc-match로 검증
+    fc-match 가 요청한 폰트가 없으면 기본 폰트로 폴백하므로, 응답에 폰트명이 포함되어야 설치된 것
+    Returns: True(설치됨) / False(미설치=폴백)
+    Raises: RuntimeError (fontconfig 자체 미설치)
+    """
+
+    try:
+        result = subprocess.run(["fc-match", font_name], capture_output=True, text=True, timeout=5)
+    except FileNotFoundError:
+        raise RuntimeError("fc-match 명령어를 찾을 수 없습니다. fontconfig 패키지를 설치하세요"
+                           "sudo apt install fontconfig")
+    except subprocess.TimeoutExpired:
+        logger.warning(f"fc-match 타임아웃 - 폰트 검증 건너뜀: {font_name}")
+        return False
+
+    output = result.stdout.strip()
+    is_installed = font_name.lower() in output.lower()
+    if not is_installed:
+        logger.warning(f"폰트 미설치 또는 폴백 발생: '{font_name}' | fc-match 응답: {output}")
+    else:
+        logger.info(f"폰트 확인: '{font_name}' 정상 설치됨")
+    return is_installed
 
 # --------------------------------------------------------------
 # 1. 전사 데이터에서 구간별 단어 추출
@@ -67,6 +104,7 @@ def extract_words_for_range(transcript_data: dict, start_sec: float, end_sec: fl
 def build_ass_header(width: int = 1080, height: int = 1920) -> str:
     """
     Default(일반) + Highlight(강조) 두 스타일을 포함함 ASS 헤더 반환
+    17일차: OUTLINE_WIDTH, SHADOW_DEPTH 상수 적용
     """
 
     return (
@@ -79,9 +117,11 @@ def build_ass_header(width: int = 1080, height: int = 1920) -> str:
         f"ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         f"Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{FONT_NAME},{FONT_SIZE},{CLR_PRIMARY},&H000000FF,"
-        f"{CLR_OUTLINE},{CLR_SHADOW},0,0,0,0,100,100,0,0,1,3,1,2,20,20,{MARGIN_V},1\n"
+        f"{CLR_OUTLINE},{CLR_SHADOW},0,0,0,0,100,100,0,0,1,"
+        f"{OUTLINE_WIDTH},{SHADOW_DEPTH},2,20,20,{MARGIN_V},1\n"
         f"Style: Highlight,{FONT_NAME},{FONT_SIZE_HL},{CLR_HIGHLIGHT},&H000000FF,"
-        f"{CLR_OUTLINE},{CLR_SHADOW},-1,0,0,0,100,100,0,0,1,3,1,2,20,20,{MARGIN_V},1\n\n"
+        f"{CLR_OUTLINE},{CLR_SHADOW},-1,0,0,0,100,100,0,0,1,"
+        f"{OUTLINE_WIDTH},{SHADOW_DEPTH},2,20,20,{MARGIN_V},1\n\n"
         f"[Events]\n"
         f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
@@ -167,9 +207,7 @@ async def run_ffmpeg_subtitle(video_path: str, ass_path: str, output_path: str) 
 
     logger.info(f"FFmpeg 자막 합성 | {Path(video_path).name} + {Path(ass_path).name}")
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         logger.error(f"FFmpeg 자막 합성 실패: {stderr.decode()[:500]}")
@@ -201,9 +239,7 @@ async def run_ffmpeg_encode(video_path: str, output_path: str, speed: float = 1.
 
     logger.info(f"최종 인코딩 | 속도: {speed}x | LUFS: {target_lufs} | {Path(output_path).name}")
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         logger.error(f"최종 인코딩 실패: {stderr.decode()[:500]}")

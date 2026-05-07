@@ -10,6 +10,9 @@
 #   - generate_subtitle(): 스텁 -> ASS 동적 자막 생성 구현
 #   - encode_final(): 스텁 -> NVENC 최종 인코딩 구현
 #   - subtitle_generator 헬퍼 모듈 import 추가
+# 17일차:
+#   - generate_subtitle() 시작부에 verify_font() 호출 추가
+#   - 퐅느 미설치 시 명확한 에러 메시지로 FAILED 처리 (한글 tofu 방지)
 
 """
 편집 서비스
@@ -32,16 +35,16 @@ from app.models.domain import Shorts, ShortStatus, Project
 from app.repositories.shorts_repository import ShortsRepository
 from app.repositories.project_repository import ProjectRepository
 
-# 리프레이밍 헬퍼 (estract_clip 추가됨, 11~!2일차)
+# 리프레이밍 헬퍼 (estract_clip 추가됨, 11~12일차)
 from app.services.reframe_engine import (
     extract_clip, detect_subjects, smooth_trajectory, 
     choose_strategy, build_crop_timeline, run_ffmpeg_reframe,
 )
 
-# 자막/인코딩 헬퍼 (11~12일차 신규)
+# 자막/인코딩 헬퍼 (11~12일차 신규 / 17일차: verify_font 추가)
 from app.services.subtitle_generator import (
     extract_words_for_range, build_ass_header, build_ass_events,
-    write_ass_file, run_ffmpeg_subtitle, run_ffmpeg_encode,
+    write_ass_file, run_ffmpeg_subtitle, run_ffmpeg_encode, verify_font
 )
 
 class EditingService:
@@ -191,6 +194,15 @@ class EditingService:
             if not words:
                 logger.info(f"자막 생략 (음성 없음): {short_id}")
                 return short
+            
+            # 17일차: 자막 렌더링 전 폰트 설치 확인 (한글 tofu 방지)
+            try:
+                if not verify_font():
+                    await self._fail_short(short, "한글 폰트(Noto Sans CJK KR) 미설치. 'sudo apt install -y fonts-noto-cjk fonts-noto-cjk-extra' 실행 후 재시도")
+                    return None
+            except RuntimeError as e:
+                await self._fail_short(short, f"폰트 검증 실패 {e}")
+                return None
 
             header = build_ass_header()
             events = build_ass_events(words)
@@ -280,9 +292,7 @@ class EditingService:
             return None
     
     async def _fail_short(self, short: Shorts, error_msg: str) -> None:
-        """
-        쇼츠 상태를 FAILED로 변경
-        """
+        """쇼츠 상태를 FAILED로 변경"""
 
         logger.error(f"쇼츠 실패: {short.id} | {error_msg}")
         await self.shorts_repo.update(short, {"status": ShortStatus.FAILED})

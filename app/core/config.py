@@ -16,6 +16,11 @@
 #   - MMPROJ_MODEL_NAME 필드 추가 (멀티모달 프로젝터 파일명)
 #   - 프레임 추출 설정 섹션 추가 (FRAME_EXTRACT_* 3개)
 #   - mmproj_model_file 프로퍼티 추가
+#
+# 17일차 변경사항:
+#   - 청크 분할 설정 3개 추가 (CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC, HIGHLIGHT_IOU_THRESHOLD)
+#   - 장편 영상 대응을 위한 전사 청크 분할 기능에 사용됨
+#   - llm_model_file 프로퍼터 추가 (경로 + 파일명 조합)
 
 """
 환경 설정 모듈
@@ -123,6 +128,26 @@ class Settings(BaseSettings):
     FRAME_EXTRACT_INTERVAL_SEC: float = 10.0
     FRAME_EXTRACT_MAX_FRAMES: int = 20
     FRAME_EXTRACT_RESOLUTION: int = 560
+
+    # --------------------------------------------------------------
+    # 청크 분할 (17일차 추가) - 장편 영상 대응
+    # --------------------------------------------------------------
+    #
+    # 배경:
+    #   93분 영상 처리 시 프롬프트가 dir 47K 토큰으로 부풀어 LLM_CTX_SIZE=8192 초과
+    #   컨텍스트를 48k로 올리면 KV 캐시 VRAM 스필오버 -> PCIe 병목 발생
+    # 해결:
+    #   전사를 CHUNK_DURATION_SEC 단위로 분할 -> 각 청크별 LLM 호출 -> 재랭킹으로 병합
+    #
+    # CHUNK_DURATION_SEC (600초):
+    #   10분 청크의 프롬프트 예상 토큰은 약 5K -> 기본 8K 컨텍스트로 안전 수용
+    # CHUNK_OVERLAP_SEC (30초):
+    #   청크 경계에 걸친 발화 단략 유실 방지 (앞뒤 각 15초)
+    # HIGHLIGHT_IOU_THRESHOLD (0.3):
+    #   여러 청크에서 같은 구간이 중복 선정된 경우 IoU 30% 이상이면 겹침으로 판단
+    CHUNK_DURATION_SEC: float = 600.0
+    CHUNK_OVERLAP_SEC: float = 30.0
+    HIGHLIGHT_IOU_THRESHOLD: float = 0.3
 
     # --------------------------------------------------------------
     # 외부 API (선택 사항)

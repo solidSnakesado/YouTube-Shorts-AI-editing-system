@@ -5,6 +5,10 @@
 # 흐름: transcript_json -> build_highlight_prompt -> call_llm -> parse_highlights
 # 6~7일차 신규 / 11~12일차: create_time_based_highlight 추가
 # 13일차: LLM 자동 길이 판단 - duration_sec 고정값 제거, 10~120초 범위 자동 결정
+# 17일차 변경사항:
+#   - build_highlight_prompt: 청크 dict 도 허용 (start_offset_sec 읽어 분석 범위 표시)
+#   - parse_highlight 에  chunk_start 파라미터 추가 (청크 범위 검증)
+#   - 청크 범위 벗어나는 하이라이트는 제외 (오버랩 영역에서 반대편 청크 침범 방지)
 
 """LLM 하이라이트 추출기 - 프롬프트 생성, LLM 호출, 응답 파싱"""
 
@@ -25,8 +29,8 @@ MAX_DURATION_SEC = 120      # 최대 쇼츠 길이 (초과 시 잘라내기)
 def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5) -> str:
     """
     전사 데이터를 LLM 프롬프트로 변환
-    13일차 변경: duration_sec 고정값 제거 -> LLM이 콘텐츠에 맞게 최적 길이를 자동 결정
-    프롬프트레 길이 가이드라인을 포함하여 10~120초 범위에서 자체 판단하도록 유도
+    13일차 : LLM 자동 길이 판단 (duration_sec 고정값 제거)
+    17일차: 청크 dict 도 허용 (start_offset_sec / end_offset_sec 로 분석 범위 표시)
 
     Args:
         transcript_data: Whisper 전사 결과 dict (segments 포함)
@@ -35,8 +39,7 @@ def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5) -> str:
         LLM에 전달할 프롬프트 문자열
     """
 
-    # 세그먼트를 타임스탬프 포함 텍스트로 포맷팅
-    # ex> "[0.0~3.5s] 안녕하세요 오늘은 놀라운 이야기를 해보겠습니다"
+    # 세그먼트를 타임스탬프 포함 텍스트로 포맷팅 (절대 시각 유지)
     formatted_lines = []
     for seg in transcript_data.get("segments", []):
         start, end = seg.get("start", 0), seg.get("end", 0)
@@ -48,11 +51,15 @@ def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5) -> str:
     total_duration = transcript_data.get("duration_sec", 0)
     language = transcript_data.get("language", "unknown")
 
+    # 17일차: 청크인 경우 절대 시각 범위 표시, 아니면 전체 영상 범위 사용
+    start_offset = transcript_data.get("start_offset_sec", 0)
+    end_offset = transcript_data.get("end_offset_sec", total_duration)
+
     return f"""당신은 유투브 쇼츠 편집 전문가입니다.
     아래 영상의 전사 텍스트를 분석하여 가장 매력적인 쇼츠 클립 구간을 선별하세요.
 
     영상 정보:
-        - 총 길이: {total_duration:.0f}초
+        - 분석 범위: {start_offset:.0f}초 ~ {end_offset:.0f}초 (총 {total_duration:.0f}초)
         - 언어: {language}
     선별 기준:
         - 최대 {max_shorts}개 클립 선별
@@ -61,7 +68,7 @@ def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5) -> str:
         - 시청자의 관심을 끌수 있는 훅(Hook)이 있는 구간 우선
         - 맥락이 완결되는 구간 (문장 중간에 잘리지 않도록)
         - 감정적 반응을 유발하는 부분 (놀라움, 유머, 감동, 인사이트)
-        - 시작 시점은 0초 이상, 끝 시점은 {total_duration:.0f}초 이하
+        - 시작 시점은 {start_offset:.0f}초 이상, 끝 시점은 {end_offset:.0f}초 이하
     반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 포함하지 마세요:
     {{
         "highlights": [
@@ -84,17 +91,7 @@ def build_highlight_prompt(transcript_data: dict, max_shorts: int = 5) -> str:
 # --------------------------------------------------------------
 
 def call_llm(llm_handle: dict, prompt: str) -> str:
-    """
-    LLM 호출 (OpenAI API / 로컬 Gemma 4 GGUF 분기)
-    llm_handle의 "type"키로 분기:
-        "openai"    -> OpenAI GPT-4o-mini API 호출
-        "local"     -> llama-cpp-python으로 로컬 Gemma 4 E4B 호출
-    Args:
-        llm_handle: gpu_manager.load_llm()이 반환한 핸들 dict
-        prompt: LLM에 전달할 프롬프트
-    Returns:
-        LLM 응답 텍스트 (JSON 문자열 이어야 함)
-    """
+    """LLM 호출 (OpenAI API / 로컬 Gemma 4 GGUF 분기, llm_handle["type"]으로 분기)"""
 
     llm_type = llm_handle.get("type")
 
@@ -104,14 +101,9 @@ def call_llm(llm_handle: dict, prompt: str) -> str:
         return _call_local(llm_handle["model"], prompt)
     else:
         raise ValueError(f"지원하지 않는 LLM 타입: {llm_type}")
-    
 
 def _call_openai(client: Any, prompt: str) -> str:
-    """
-    OpenAI API를 통한 LLM 호출
-    GPT-4o-mini 사용 (비용 효율적, JSON 출력 우수)
-    response_format=json_object로 JSON 출력 강제
-    """
+    """OpenAI API GPT-4o-mini 호출 (JSON 모드 강제, temperature=0.3)"""
 
     logger.info("OpenAI API 호출 시작")
 
@@ -131,14 +123,7 @@ def _call_openai(client: Any, prompt: str) -> str:
     return result
 
 def _call_local(model: Any, prompt: str) -> str:
-    """
-    로컬 Gemma 4 E4B 호출 (llama-cpp-python)
-    Gemma 4 공식 권장 샘플링 파라미터:
-        temperature=1.0, top_p=0.95, top_k=64, repeat_penalty=1.0
-    하이라이트 추출은 정확한 JSON이 필요하므로:
-        temperature를 0.3으로 낮춤 (창의성 < 정확성)
-        나머지는 Gemma 4 권장값 유지
-    """
+    """로컬 Gemma 4 E4B 호출 (llama-cpp-python, 권장 샘플링값 적용, temperature=0.3)"""
 
     logger.info("Gemma 4 E4B 로컬 호출 시작")
 
@@ -162,11 +147,11 @@ def _call_local(model: Any, prompt: str) -> str:
 # 응답 파싱
 # --------------------------------------------------------------
 
-def parse_highlights(llm_response: str, total_duration: float, max_shorts: int) -> list[dict]:
+def parse_highlights(llm_response: str, total_duration: float, max_shorts: int, chunk_start: float = 0.0) -> list[dict]:
     """
     LLM 응답에서 하이라이트 목록 추출 + 검증
     파싱 전략 (3단계 폴백): JSON 직접 -> 코드블록 -> 중괄호 패턴
-    검증: 시간 범위, 최소 5초, hook_score 클리핑, max_shorts 제한
+    17일차: chunk_start 파라미터 추가 - 청크 범위 밖 하이라이느틑 제외 (오버랩 침범 방지)
     """
 
     raw = _extract_json(llm_response)
@@ -179,10 +164,10 @@ def parse_highlights(llm_response: str, total_duration: float, max_shorts: int) 
         logger.error(f"highlights가 리스트가 아님: {type(highlights_raw)}")
         return []
     
-    # 개별 항목 검증
+    # 개별 항목 검증 (17일차: chunk_start 전달)
     validated = []
     for h in highlights_raw:
-        item = _validate_highlight(h, total_duration)
+        item = _validate_highlight(h, total_duration, chunk_start)
         if item:
             validated.append(item)
 
@@ -194,11 +179,7 @@ def parse_highlights(llm_response: str, total_duration: float, max_shorts: int) 
     return result
 
 def _extract_json(text: str) -> dict | None:
-    """
-    텍스트에서 JSON 객체를 추출 (3단계 폴백)
-    LLM이 순수 JSON 대신 마크다운 코드블록이나
-    설명 텍스트를 함께 출력하는 경우를 대응
-    """
+    """텍스트에서 JSON 객체를 추출 (3단계 폴백: 직접 -> 코드블록 -> 중괄호)"""
 
     # 1차: 전체 텍스트를 직접 JSON 파싱
     try: 
@@ -224,12 +205,13 @@ def _extract_json(text: str) -> dict | None:
 
     return None
 
-def _validate_highlight(h: dict, total_duration: float) -> dict | None:
+def _validate_highlight(h: dict, total_duration: float, chunk_start: float = 0.0) -> dict | None:
     """
     개별 하이라이트 검증 및 정규화
     검증: 시간 순서, 영상 범위 클리핑, 최소 5초, hook_score 0~1 클리핑
     Returns: 유효한 dict 또는 None
-    13일차 변경: MIN/MAX_DURATION_SEC 상수 적용, 초과 시 잘라내기 추가
+    13일차: MIN/MAX_DURATION_SEC 상수 적용, 초과 시 잘라내기 추가
+    17일차: chunk_start 범위 검증 - 청크 범위 밖 하이라이트는 제외
     """
 
     # 시간 값 파싱
@@ -243,9 +225,13 @@ def _validate_highlight(h: dict, total_duration: float) -> dict | None:
     if start < 0 or end <= start:
         return None
     
-    # 영상 범위 내로 클리핑
-    start = max(0.0, start)
-    end = min(total_duration, end)
+    # 17일차: 청크 범위 빆 하이라이트 제외 (오버랩 영역에서 반대편 청크 침범 방지)
+    if start < chunk_start or end > total_duration:
+        logger.debug(
+            f"청크 범위 밖 하이라이트 제외: [{start:.1f} - {end:.1f}] "
+            f"청크 범위: [{chunk_start:.1f} - {total_duration:.1f}]"
+        )
+        return None
 
     # 최대 길이 초과 시 잘라내기 (13일차 추가)
     if end - start > MAX_DURATION_SEC:
