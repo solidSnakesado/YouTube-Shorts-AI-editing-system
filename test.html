@@ -55,7 +55,14 @@
 <h1>YT Shorts AI</h1>
 <p class="subtitle">유튜브 영상 → 쇼츠 자동 생성 파이프라인 테스트</p>
 
-<div class="container">
+<!-- 탭 네비게이션 -->
+<div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
+  <button class="btn btn-primary" id="tabPipeline" onclick="switchTab('pipeline')" style="font-size:12px;padding:8px 20px">🎬 쇼츠 파이프라인</button>
+  <button class="btn btn-secondary" id="tabHeatmap" onclick="switchTab('heatmap')" style="font-size:12px;padding:8px 20px">🔥 히트맵 수집</button>
+</div>
+
+<!-- 파이프라인 탭 -->
+<div class="container" id="pipelineTab">
 
   <!-- 입력 -->
   <div class="card">
@@ -108,7 +115,83 @@
     </div>
   </div>
 
-</div>
+</div><!-- /pipelineTab -->
+
+<!-- 히트맵 수집 탭 -->
+<div class="container" id="heatmapTab" style="display:none">
+
+  <!-- 모드 선택 -->
+  <div class="card">
+    <div class="card-title">수집 모드</div>
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <button class="btn btn-primary" id="hmModeSingle" onclick="setHmMode('single')" style="font-size:12px">단일 URL</button>
+      <button class="btn btn-secondary" id="hmModeChannel" onclick="setHmMode('channel')" style="font-size:12px">채널/재생목록</button>
+    </div>
+
+    <!-- 단일 URL 입력 -->
+    <div id="hmSingleInput">
+      <div class="row">
+        <div style="flex:1;min-width:280px">
+          <label>YouTube URL</label>
+          <input id="hmUrl" placeholder="https://www.youtube.com/watch?v=..." />
+        </div>
+        <button class="btn btn-primary" onclick="hmCollectSingle()">수집</button>
+      </div>
+    </div>
+
+    <!-- 채널 URL 입력 -->
+    <div id="hmChannelInput" style="display:none">
+      <div class="row" style="margin-bottom:12px">
+        <div style="flex:1;min-width:280px">
+          <label>채널 / 재생목록 URL</label>
+          <input id="hmChannelUrl" placeholder="https://www.youtube.com/@채널명/videos" />
+        </div>
+        <div style="width:100px">
+          <label>최대 영상 수</label>
+          <input id="hmMaxVideos" type="number" value="50" min="1" max="500" style="text-align:center" />
+        </div>
+        <button class="btn btn-secondary" onclick="hmExtractUrls()">URL 추출</button>
+      </div>
+      <div id="hmUrlList" style="display:none;margin-bottom:12px">
+        <label>추출된 URL (<span id="hmUrlCount">0</span>개)</label>
+        <textarea id="hmUrlTextarea" style="width:100%;height:120px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:10px;font-family:inherit;font-size:12px;resize:vertical"></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="hmCollectBatch()">🔥 일괄 수집 시작</button>
+          <div style="font-size:11px;color:#94a3b8;display:flex;align-items:center">
+            Rate limit: <input id="hmRateLimit" type="number" value="2" min="0.5" max="10" step="0.5" style="width:50px;text-align:center;margin:0 4px;padding:4px;font-size:11px">초
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 수집 진행/결과 -->
+  <div class="card">
+    <div class="card-title">수집 진행 상황</div>
+    <div id="hmProgress"><p class="empty">수집을 시작하세요</p></div>
+  </div>
+
+  <!-- 수집된 파일 목록 -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <span class="card-title" style="margin:0">저장된 데이터 파일</span>
+      <button class="btn btn-secondary" style="padding:4px 12px;font-size:11px" onclick="hmLoadFiles()">새로고침</button>
+    </div>
+    <div id="hmFiles"><p class="empty">로딩 중...</p></div>
+  </div>
+
+  <!-- 히트맵 로그 -->
+  <div class="card" style="padding:0;overflow:hidden">
+    <div class="log-header">
+      <span class="card-title" style="margin:0">Heatmap Log <span id="hmLoadingDot" style="display:none;color:#f59e0b">● 처리 중...</span></span>
+      <button class="btn btn-secondary" style="padding:2px 10px;font-size:11px" onclick="document.getElementById('hmLogBody').innerHTML=''">Clear</button>
+    </div>
+    <div class="log-body" id="hmLogBody">
+      <div class="log-line log-info">히트맵 수집 모드입니다...</div>
+    </div>
+  </div>
+
+</div><!-- /heatmapTab -->
 
 <script>
 const API = `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
@@ -242,6 +325,146 @@ function resetAll() {
 }
 
 renderSteps(); updateStepUI();
+
+// ============================================================
+// 탭 전환
+// ============================================================
+function switchTab(tab) {
+  document.getElementById("pipelineTab").style.display = tab === "pipeline" ? "flex" : "none";
+  document.getElementById("heatmapTab").style.display = tab === "heatmap" ? "flex" : "none";
+  document.getElementById("tabPipeline").className = `btn ${tab === "pipeline" ? "btn-primary" : "btn-secondary"}`;
+  document.getElementById("tabHeatmap").className = `btn ${tab === "heatmap" ? "btn-primary" : "btn-secondary"}`;
+  if (tab === "heatmap") hmLoadFiles();
+}
+
+// ============================================================
+// 히트맵 수집
+// ============================================================
+function setHmMode(mode) {
+  document.getElementById("hmSingleInput").style.display = mode === "single" ? "block" : "none";
+  document.getElementById("hmChannelInput").style.display = mode === "channel" ? "block" : "none";
+  document.getElementById("hmModeSingle").className = `btn ${mode === "single" ? "btn-primary" : "btn-secondary"}`;
+  document.getElementById("hmModeChannel").className = `btn ${mode === "channel" ? "btn-primary" : "btn-secondary"}`;
+}
+
+function hmLog(msg, type="info") {
+  const ts = new Date().toLocaleTimeString("ko-KR");
+  const el = document.getElementById("hmLogBody");
+  el.innerHTML += `<div class="log-line log-${type}"><span class="log-ts">${ts}</span>${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function hmSetLoading(v) {
+  document.getElementById("hmLoadingDot").style.display = v ? "inline" : "none";
+}
+
+async function hmCollectSingle() {
+  const url = document.getElementById("hmUrl").value.trim();
+  if (!url) return;
+  hmSetLoading(true);
+  hmLog(`→ 단일 수집: ${url}`, "request");
+  try {
+    const res = await fetch(`${API}/heatmap/collect`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({url}) });
+    const d = await res.json();
+    if (d.status === "collected") {
+      hmLog(`✓ ${d.video_id} | ${d.title} | 구간=${d.heatmap_count}, 피크=${d.peak_count}`, "success");
+      hmUpdateProgress([d]);
+    } else {
+      hmLog(`- 스킵 (히트맵 없음 또는 조건 미충족)`, "info");
+    }
+  } catch(e) { hmLog(`✗ ${e.message}`, "error"); }
+  hmSetLoading(false);
+  hmLoadFiles();
+}
+
+async function hmExtractUrls() {
+  const channelUrl = document.getElementById("hmChannelUrl").value.trim();
+  const max = +document.getElementById("hmMaxVideos").value;
+  if (!channelUrl) return;
+  hmSetLoading(true);
+  hmLog(`→ URL 추출: ${channelUrl} (최대 ${max}개)`, "request");
+  try {
+    const res = await fetch(`${API}/heatmap/channel-urls`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({channel_url:channelUrl, max_videos:max}) });
+    const d = await res.json();
+    if (d.detail) { hmLog(`✗ ${d.detail}`, "error"); hmSetLoading(false); return; }
+    document.getElementById("hmUrlTextarea").value = d.urls.join("\n");
+    document.getElementById("hmUrlCount").textContent = d.total;
+    document.getElementById("hmUrlList").style.display = "block";
+    hmLog(`✓ ${d.total}개 URL 추출 완료`, "success");
+  } catch(e) { hmLog(`✗ ${e.message}`, "error"); }
+  hmSetLoading(false);
+}
+
+async function hmCollectBatch() {
+  const text = document.getElementById("hmUrlTextarea").value.trim();
+  const urls = text.split("\n").map(u=>u.trim()).filter(u=>u && !u.startsWith("#"));
+  const rate = +document.getElementById("hmRateLimit").value || 2;
+  if (!urls.length) return;
+  hmSetLoading(true);
+  hmLog(`→ 일괄 수집 시작: ${urls.length}개 URL, rate=${rate}초`, "request");
+  document.getElementById("hmProgress").innerHTML = `<p style="color:#f59e0b">0 / ${urls.length} 처리 중...</p>`;
+  try {
+    const res = await fetch(`${API}/heatmap/collect-batch`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({urls, rate_limit_sec:rate}) });
+    const d = await res.json();
+    hmLog(`✓ 완료 | 성공:${d.success} 스킵:${d.skipped} 실패:${d.failed} / 전체:${d.total}`, "success");
+    hmUpdateProgress(d.results);
+    d.results.forEach((r,i) => {
+      if (r.status === "collected") hmLog(`  #${i+1} ${r.video_id} — ${r.title}`, "success");
+      else if (r.status === "skipped") hmLog(`  #${i+1} 스킵`, "info");
+      else hmLog(`  #${i+1} 실패: ${r.title}`, "error");
+    });
+  } catch(e) { hmLog(`✗ ${e.message}`, "error"); }
+  hmSetLoading(false);
+  hmLoadFiles();
+}
+
+function hmUpdateProgress(results) {
+  const s = results.filter(r=>r.status==="collected").length;
+  const k = results.filter(r=>r.status==="skipped").length;
+  const f = results.filter(r=>r.status==="failed").length;
+  document.getElementById("hmProgress").innerHTML = `
+    <div style="display:flex;gap:20px;font-size:14px">
+      <span style="color:#4ade80">✓ 성공: ${s}</span>
+      <span style="color:#94a3b8">- 스킵: ${k}</span>
+      <span style="color:#f87171">✗ 실패: ${f}</span>
+      <span style="color:#e2e8f0">전체: ${results.length}</span>
+    </div>`;
+}
+
+async function hmLoadFiles() {
+  try {
+    const res = await fetch(`${API}/heatmap/results`);
+    const d = await res.json();
+    const el = document.getElementById("hmFiles");
+    if (!d.files.length) { el.innerHTML = '<p class="empty">수집된 파일 없음</p>'; return; }
+    el.innerHTML = d.files.map(f => `
+      <button class="short-btn" onclick="hmShowFile('${f.filename}')">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="color:#6366f1;font-size:11px">📄</span>
+          <span>${f.filename}</span>
+        </div>
+        <div style="display:flex;gap:12px;font-size:11px;color:#94a3b8">
+          <span>${f.video_count}개 영상</span>
+          <span>${f.size_kb} KB</span>
+        </div>
+      </button>
+    `).join("");
+  } catch(e) { /* 서버 미실행 시 무시 */ }
+}
+
+async function hmShowFile(filename) {
+  try {
+    const res = await fetch(`${API}/heatmap/results/${filename}`);
+    const d = await res.json();
+    const el = document.getElementById("hmProgress");
+    el.innerHTML = `<div class="card-title" style="margin-bottom:8px">${filename} (${d.total}개 영상)</div>` +
+      d.entries.map((e,i) => `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1e293b;font-size:12px">
+          <span style="color:#e2e8f0">#${i+1} ${e.title?.slice(0,40) || e.video_id}</span>
+          <span style="color:#94a3b8">${Math.floor(e.duration_sec/60)}분 | 구간:${e.heatmap_count} | 피크:${e.peak_count}</span>
+        </div>`).join("");
+  } catch(e) { hmLog(`✗ ${e.message}`, "error"); }
+}
 </script>
 </body>
 </html>

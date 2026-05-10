@@ -21,6 +21,12 @@
 #   - 청크 분할 설정 3개 추가 (CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC, HIGHLIGHT_IOU_THRESHOLD)
 #   - 장편 영상 대응을 위한 전사 청크 분할 기능에 사용됨
 #   - llm_model_file 프로퍼터 추가 (경로 + 파일명 조합)
+#
+# 20일차 변경사항:
+#   - 히트맵 수집 설정 4개 추가 (HEATMAP_OUTPUT_DIR, HEATMAP_RATE_LIMIT_SEC,
+#     HEATMAP_MIN_DURATION_SEC, HEATMAP_REQUEST_TIMEOUT_SEC)
+#   - YouTube "Most Replayed" 히트맵 크롤러용 (파인튜닝 데이터 수집)
+#   - heatmap_output_path 프로퍼티 추가 (디렉토리 자동 생성)
 
 """
 환경 설정 모듈
@@ -150,6 +156,31 @@ class Settings(BaseSettings):
     HIGHLIGHT_IOU_THRESHOLD: float = 0.3
 
     # --------------------------------------------------------------
+    # 히트맵 수집 (20일차 추가) - YouTube "Most Replayed" 크롤러
+    # --------------------------------------------------------------
+    #
+    # 목적:
+    #   YouTube의 "Most Replayed" 히트맵 데이터를 다수 영상에서 수집하여 
+    #   21일차 멀티모달 파인튜닝 데이터셋의 라벨로 사용
+    #
+    # 동작 메커니즘:
+    #   YouTube Data API는 히트맵을 공식 노출하지 않으므로 yt-dlp의
+    #   info.heatmap 필드(InnerTube에서 파싱)를 통해 추출
+    #
+    # HEATMAP_OUTPUT_DIR:
+    #   수집 결과 JSONL 파일 저장 경로 (영상별 1라인)
+    # HEATMAP_RATE_LIMIT_SEC:
+    #   영상 간 호출 간격 (초), YouTube IP 차단 회피용 매너모드
+    # HEATMAP_MIN_DURATION_SEC:
+    #   너무 짧은 영상은 히트맵이 없거나 노이즈가 심함 - 필터 기준
+    # HEATMAP_REQUEST_TIMEOUT_SEC:
+    #   yt-dlp metadata 호출 타임아웃 (네트워크 지연 시 hang 방지)
+    HEATMAP_OUTPUT_DIR: str = "./data/heatmaps"
+    HEATMAP_RATE_LIMIT_SEC: float = 2.0
+    HEATMAP_MIN_DURATION_SEC: float = 60.0
+    HEATMAP_REQUEST_TIMEOUT_SEC: int = 30
+
+    # --------------------------------------------------------------
     # 외부 API (선택 사항)
     # --------------------------------------------------------------
     # 빈 문자열이면 로컬 Gemma 4 사용, 값이 있으면 API 사용
@@ -182,17 +213,13 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------
     @property
     def is_dev(self) -> bool:
-        """
-        현재 개발 환경인지 판별. DB 쿼리 로그 출력 등에 사용
-        """
+        """현재 개발 환경인지 판별. DB 쿼리 로그 출력 등에 사용"""
 
         return self.APP_ENV == "development"
     
     @property
     def output_path(self) -> Path:
-        """
-        출력 디렉토리 Path 객체, 존재하지 않으면 자동 생성
-        """
+        """출력 디렉토리 Path 객체, 존재하지 않으면 자동 생성"""
 
         p = Path(self.OUTPUT_DIR)
         p.mkdir(parents=True, exist_ok=True)
@@ -200,9 +227,7 @@ class Settings(BaseSettings):
     
     @property
     def temp_path(self) -> Path:
-        """
-        임시 디렉토리 Path 객체, 존재하지 않으면 자동 생성
-        """
+        """임시 디렉토리 Path 객체, 존재하지 않으면 자동 생성"""
         
         p = Path(self.TEMP_DIR)
         p.mkdir(parents=True, exist_ok=True)
@@ -235,6 +260,22 @@ class Settings(BaseSettings):
         """
 
         return Path(self.LLM_MODEL_PATH) / self.MMPROJ_MODEL_NAME
+    
+    @property
+    def heatmap_output_path(self) -> Path:
+        """
+        히트맵 JSONL 출력 디렉토리 (20일차 추가)
+
+        다수 영상의 히트맵을 누적 저장하는 디렉토리
+        존재하지 않으면 자동 생성 (parents=True로 상위 디렉토리도 같이 생성)
+
+        ex> ./data/heatmaps/heatmaps_2026-05-07.jsonl
+        """
+
+        p = Path(self.HEATMAP_OUTPUT_DIR)
+        p.mkdir(parents=True, exist_ok=True)
+
+        return p
     
 # 최초 1회만 Settings 객체 생성, 이후 호출에서는 캐시된 동일 객체 반환
 @lru_cache
