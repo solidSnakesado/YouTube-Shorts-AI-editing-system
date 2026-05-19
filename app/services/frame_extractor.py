@@ -12,6 +12,11 @@
 #   - _encode_frame_to_base64(): JPEG 파일 -> base64 문자열 반환
 #   - _get_video_duration(): FFprobe로 영상 길이 조회
 #
+# 21일차 변경:
+#   - extract_frames()에 start_sec/end_sec/save_dir 파라미터 추가 (하위 호환)
+#   - save_dir 지정 시 JPEG 파일을 해당 경로에 저장하고 파일 경로 목록 반환
+#   - 파인 튜닝 데이터 준비(DatasetBuilder)에서 특정 시간 범위 프레임 추출에 사용
+#
 # Gemma 4 비주얼 토큰 예산 (설정 가이드):
 #   560px -> 프레임당 ~280토큰 -> 20프레임 = ~5,600토큰 (일반 분석)
 #   1120px -> 프레임당 ~1,120토큰 -> 10프레임 = ~11,200토큰 (OCR/세부)
@@ -37,6 +42,9 @@ async def extract_frames(
     interval_sec: float | None = None,
     max_frames: int | None = None,
     resolution: int | None = None,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    save_dir: Path | None = None,
 ) -> list[dict]:
     """
     영상에서 일정 간격으로 프레임을 추출하고 base64로 인코딩
@@ -49,16 +57,15 @@ async def extract_frames(
         interval_sec: 프레임 추출 간격 (초, 기본: settings.FRAME_EXTRACT_INTERVAL_SEC)
         max_frames: 최대 추출 프레임 수 (기본: settings.FRAME_EXTRACT_MAX_FRAMES)
         resolution: 프레임 해상도 - 짧은 변 기준 (기본: settings.FRAME_EXTRACT_RESOLUTION)
+        start_sec: 추출 시간 시간 (초, 기본: 0.0) - 21일차 추가
+        end_sec: 추출 종료 시간 (초, None이면 영상 끝까지) - 21일차 추가
+        save_dir: JPEG 저장 경로 (None이면 base64 반환, 경로 지정 시 파일 저장) - 21일차 추가
 
     Returns:
-        [
-            {
-                "timestamp_sec": 0.0,       # 영상 내 위치 (초)
-                "base64": "...",            # JPEG base64 문자열
-                "mime_type": "image/jpeg"   # MIME 타입
-            },
-            ...
-        ]
+        save_dir=None (기본, 하위 호환):
+            [{"timestamp_sec": 0.0, "base64": "...", "mine_type": "image/jpeg"}, ...]
+        save_dir 지정 시:
+            [{"timestamp_sec": 0.0, "path": "/abs/path/frame.jpg", "mine_type": "image/jpeg"}, ...]
 
     Raises:
         FileNotFoundError: 영상 파일 미존재
@@ -76,39 +83,60 @@ async def extract_frames(
 
     # 영상 길이 조회 -> 실제 필요한 프레임 수 계산
     duration = await _get_video_duration(video_path)
-    total_possible = int(duration / interval_sec) + 1
+    effective_end = min(end_sec, duration) if end_sec else duration
+    effective_duration = max(0.0, effective_end - start_sec)
+
+    # 범위 내 프레임 수 계산
+    total_possible = int(effective_duration / interval_sec) + 1
     frame_count = min(total_possible, max_frames)
 
     # 영상이 짧아서 추출할 프레임이 없는 경우
     if frame_count <= 0:
-        logger.warning(f"영상이 너무 짧아 프레임 추출 불가: {duration:.1f}초")
+        logger.warning(f"영상이 너무 짧아 프레임 추출 불가: {effective_duration:.1f}초")
         return []
     
-    # 임시 디렉토리 생성 (프레임 JPEG 저장용)
-    frames_dir = video_path.parent / f"frames_{video_path.stem}"
-    frames_dir.mkdir(parents=True, exist_ok=True)
+    # 프레임 저장 디렉토리 결정
+    # save_dir 지정 시: 해당 경로에 영구 저장 (파인튜닝용)
+    # save_dir 미지정: 임시 디렉토리에 저장 후 base64 변환 (기존 동작)
+    if save_dir:
+        frames_dir = Path(save_dir)
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        cleanup = False
+    else:
+        frames_dir = video_path.parent / f"frames_{video_path.stem}"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        cleanup = True
 
     try:
-        # FFmpeg로 프레임 추출
-        # fps=1/{interval}: N초마다 1프레임 캡쳐
-        # scale={resolution}:-1: 짧은 변을 resolution으로 리사이즈, 비율 유지
-        # -frame:v {frame_count}: 최대 프레임 수 제한
-        # -q:v 3: JPEG 품질 (1=최고, 31=최저, 3=양호)
+        # FFmpeg 명령 구성
+        # -ss: 시작 시간 (입력 전 탐색으로 빠른 seek)
+        # -t: 추출 구간 길이
         fps_filter = f"fps=1/{interval_sec}"
         scale_filter = f"scale={resolution}:-1"
         output_pattern = str(frames_dir / "frame_%04d.jpg")
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_path),
+        cmd = ["ffmpeg", "-y"]
+
+        # 시작 시간이 0이 아니면 -ss로 탐색 (입력 전 seek)
+        if start_sec > 0:
+            cmd.extend(["-ss", str(start_sec)])
+
+        cmd.extend(["-i", str(video_path)])
+
+        # 종료 시간이 지정되면 -t로 구간 길이 제한
+        if effective_duration < duration:
+            cmd.extend(["-t", str(effective_duration)])
+
+        cmd.extend([
             "-vf", f"{fps_filter},{scale_filter}",
             "-frames:v", str(frame_count),
             "-q:v", "3",
             output_pattern,
-        ]
+        ])
 
         logger.info(
             f"프레임 추출 시작 | {video_path.name} | "
+            f"범위: {start_sec:.0f}~{effective_end:.0f}초 | "
             f"간격: {interval_sec}초 | 최대: {frame_count}프레임 | "
             f"해상도: {resolution}px"
         )
@@ -130,26 +158,33 @@ async def extract_frames(
             logger.warning("FFmpeg 성공했지만 추출된 프레임이 없습니다")
             return []
         
-        # 각 프레임을 base64로 인코딩
+        # 결과 구성: save_dir 여부에 따라 base64 또는 파일 경로 반환
         results = []
         for idx, frame_file in enumerate(frame_files):
             timestamp = idx * interval_sec
-            b64_str = _encode_frame_to_base64(frame_file)
-            results.append({
-                "timestamp_sec": round(timestamp, 1),
-                "base64": b64_str,
-                "mime_type": "image/jpeg",
-            })
+            if save_dir:
+                results.append({
+                    "timestamp_sec": round(timestamp, 1),
+                    "path": str(frame_file.resolve()),
+                    "mime_type": "image/jpeg",
+                })
+            else:
+                b64_str = _encode_frame_to_base64(frame_file)
+                results.append({
+                    "timestamp_sec": round(timestamp, 1),
+                    "base64": b64_str,
+                    "mime_type": "image/jpeg",
+                })
 
         logger.info(
             f"프레임 추출 완료 | {len(results)}프레임 | "
-            f"0.0~{results[-1]['timestamp_sec']}초"
+            f"{results[0]['timestamp_sec']}~{results[-1]['timestamp_sec']}초"
         )
 
         return results
     finally:
-        # 임시 프레임 디렉토리 정리 (base64 변환 완료 후 JPEG 파일 불필요)
-        if frames_dir.exists():
+        # 임시 프레임만 디렉토리 정리 (save_dir 지정 시 보존)
+        if cleanup and frames_dir.exists():
             shutil.rmtree(frames_dir, ignore_errors=True)
 
 

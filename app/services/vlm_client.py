@@ -93,9 +93,7 @@ async def run_vlm_analysis(source_path: str, transcript_data: dict, max_shorts: 
         messages = _build_vlm_messages(frames, transcript_data, max_shorts)
 
         # 4. VLM API 호출 - 동기(urllib) -> 스레드 풀
-        response_text = await loop.run_in_executor(
-            None, _call_vlm_api, messages
-        )
+        response_text = await loop.run_in_executor(None, _call_vlm_api, messages)
 
         # 응답 파싱 (기존 parse_highlights 재사용)
         total_duration = transcript_data.get("duration_sec", 0)
@@ -206,8 +204,16 @@ def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts
         '{"highlights": [\n'
         '   {"start_sec": 0.0, "end_sec": 30.0, "hook_score": 0.95,\n'
         '    "reason": "선정 이유", "title_suggestion": "제목",\n'
-        '    "tags": ["태그1", "태그2"]}\n'
-        "]}"
+        '    "tags": ["태그1", "태그2"],\n'
+        '    "recommended_aspect_ratio": "9:16"}\n'
+        "]}\n\n"
+        "종횡비 선택 기준:\n"
+        "- 9:16: 인물 중심, 세로형 쇼츠/릴스/틱톡\n"
+        "- 16:9: 풍경, 게임플레이, 시네마틱, 다수 인물\n"
+        "- 1:1: 인스타그램 피드, 대칭 구도\n"
+        "- 4:5: 인스타그램 세로, 인물+배경 균형\n"
+        "- 4:3: 클래식, 레트로, 프레젠테이션\n"
+        "- 16:10: 와이드 게임플레이, 울트라 와이드\n"
     )
 
     return "\n".join(parts)

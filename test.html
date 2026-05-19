@@ -75,6 +75,17 @@
         <label>쇼츠 수</label>
         <input id="maxShorts" type="number" value="3" min="1" max="10" style="text-align:center" />
       </div>
+      <div style="width:110px">
+        <label>종횡비</label>
+        <select id="aspectRatio" style="width:100%;padding:10px 8px;font-size:13px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-family:inherit">
+          <option value="9:16">9:16 쇼츠</option>
+          <option value="16:9">16:9 가로</option>
+          <option value="1:1">1:1 정사각</option>
+          <option value="4:5">4:5</option>
+          <option value="4:3">4:3</option>
+          <option value="16:10">16:10</option>
+        </select>
+      </div>
       <button class="btn btn-primary" onclick="runAll()">▶ 전체 실행</button>
       <button class="btn btn-secondary" onclick="resetAll()">↺ 초기화</button>
     </div>
@@ -200,8 +211,8 @@ const STEPS = [
   { id:2, label:"다운로드",     ep:"download", desc:"yt-dlp + 오디오 추출" },
   { id:3, label:"전사",         ep:"transcribe", desc:"Whisper 음성→텍스트" },
   { id:4, label:"하이라이트",    ep:"analyze", desc:"LLM 하이라이트 추출" },
-  { id:5, label:"리프레이밍",    ep:"edit", desc:"YOLO + 9:16 크롭" },
-  { id:6, label:"자막",         ep:"subtitle", desc:"ASS 카라오케 자막" },
+  { id:5, label:"리프레이밍",    ep:"edit", desc:"YOLO + 크롭" },
+  { id:6, label:"자막(보류)",    ep:"subtitle", desc:"ASS 카라오케 자막 (보류)", skip:true },
   { id:7, label:"인코딩",       ep:"encode", desc:"NVENC 최종 출력" },
 ];
 const STATUS_CLR = { pending:"#6b7280", downloading:"#3b82f6", analyzing:"#8b5cf6", editing:"#f59e0b", completed:"#10b981", failed:"#ef4444", queued:"#6b7280", reframing:"#3b82f6", encoding:"#f59e0b" };
@@ -243,13 +254,22 @@ function renderShorts() {
   if (!state.shorts.length) { el.innerHTML = '<p class="empty">하이라이트 추출 후 표시됩니다</p>'; return; }
   el.innerHTML = state.shorts.map((s, i) => {
     const c = STATUS_CLR[s.status] || "#6b7280";
+    const canResize = s.output_path && s.status !== "failed";
     return `<button class="short-btn${i === state.activeIdx ? " active" : ""}" onclick="selectShort(${i})">
       <div style="display:flex;align-items:center;gap:10px">
         <span class="short-num">#${i+1}</span>
         <span>${s.start_sec?.toFixed(1)}s – ${s.end_sec?.toFixed(1)}s</span>
         ${s.hook_score != null ? `<span class="score">★ ${s.hook_score.toFixed(2)}</span>` : ""}
+        ${s.aspect_ratio ? `<span style="font-size:9px;color:#a78bfa;background:rgba(167,139,250,0.12);padding:1px 6px;border-radius:3px">${s.aspect_ratio}</span>` : ""}
       </div>
-      <span class="badge" style="background:${c}22;color:${c}">${s.status}</span>
+      <div style="font-size:10px;color:#94a3b8;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:400px">${s.highlight_reason || s.title_suggestion || ""}</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        ${canResize ? `<select class="resize-sel" id="resizeSel${i}" onclick="event.stopPropagation()" style="padding:3px 6px;font-size:10px;background:#0f172a;border:1px solid #334155;border-radius:4px;color:#94a3b8;font-family:inherit">
+          <option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option>
+          <option value="4:5">4:5</option><option value="4:3">4:3</option><option value="16:10">16:10</option>
+        </select><button class="btn btn-secondary" onclick="event.stopPropagation();resizeShort(${i})" style="padding:3px 8px;font-size:10px">리사이즈</button>` : ""}
+        <span class="badge" style="background:${c}22;color:${c}">${s.status}</span>
+      </div>
     </button>`;
   }).join("");
 }
@@ -294,7 +314,11 @@ async function runStep(id) {
     const suffix = id === 4 ? `?max_shorts=${document.getElementById("maxShorts").value}` : "";
     const d = await apiCall(`${API}/projects/${state.projectId}/${STEPS[id-1].ep}${suffix}`, { method:"POST" });
     if (d) {
-      if (id === 4 && d.items) { state.shorts = d.items; state.activeIdx = 0; addLog(`쇼츠 ${d.total}개 생성됨`, "success"); d.items.forEach((s,i) => addLog(`  #${i+1} ${s.start_sec?.toFixed(1)}-${s.end_sec?.toFixed(1)}s | score: ${s.hook_score}`)); renderShorts(); }
+      if (id === 4 && d.items) { state.shorts = d.items; state.activeIdx = 0; addLog(`쇼츠 ${d.total}개 생성됨`, "success"); d.items.forEach((s,i) => { addLog(`  #${i+1} ${s.start_sec?.toFixed(1)}-${s.end_sec?.toFixed(1)}s | score: ${s.hook_score} | 비율: ${s.aspect_ratio || "9:16"}`); if (s.highlight_reason) addLog(`     이유: ${s.highlight_reason}`, "info"); if (s.title_suggestion) addLog(`     제목: ${s.title_suggestion}`, "info"); }); renderShorts();
+        // AI 추천 비율을 드롭다운 기본값으로 설정 (첫 번째 쇼츠 기준)
+        const aiAr = d.items[0]?.aspect_ratio;
+        if (aiAr) { const sel = document.getElementById("aspectRatio"); for (let o of sel.options) { if (o.value === aiAr) { sel.value = aiAr; break; } } addLog(`AI 추천 종횡비: ${aiAr} (드롭다운 자동 설정)`, "info"); }
+      }
       state.projectStatus = d.status || state.projectStatus; state.currentStep = id; renderProject(); updateStepUI();
     }
   } else {
@@ -302,7 +326,17 @@ async function runStep(id) {
     const sid = state.shorts[state.activeIdx]?.id;
     if (!sid) return;
     addLog(`[Step ${id}] ${STEPS[id-1].label} — 쇼츠 #${state.activeIdx+1} (${sid.slice(0,8)}...)`);
-    const d = await apiCall(`${API}/shorts/${sid}/${STEPS[id-1].ep}`, { method:"POST" });
+    if (STEPS[id-1].skip) { addLog(`  → 보류 기능이므로 건너뜁니다`, "info"); return; }
+    let epSuffix = "";
+    if (id === 5) {
+      // 사용자 선택 비율 우선, 없으면 해당 쇼츠의 AI 추천 비율 사용
+      const userAr = document.getElementById("aspectRatio").value;
+      const aiAr = state.shorts[state.activeIdx]?.aspect_ratio;
+      const ar = userAr || aiAr || "9:16";
+      epSuffix = `?aspect_ratio=${ar}`;
+      addLog(`  종횡비: ${ar}${aiAr && ar === aiAr ? " (AI 추천)" : " (사용자 지정)"}`, "info");
+    }
+    const d = await apiCall(`${API}/shorts/${sid}/${STEPS[id-1].ep}${epSuffix}`, { method:"POST" });
     if (d) { state.shorts = state.shorts.map(s => s.id === sid ? d : s); state.currentStep = id; if (d.status === "completed") addLog(`최종 출력: ${d.output_path}`, "success"); renderShorts(); updateStepUI(); }
   }
 }
@@ -314,7 +348,7 @@ async function runAll() {
   for (let si = 0; si < state.shorts.length; si++) {
     state.activeIdx = si; renderShorts();
     addLog(`\n━━━ 쇼츠 #${si+1}/${state.shorts.length} 처리 시작 ━━━`, "info");
-    for (let i = 5; i <= 7; i++) { await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
+    for (let i = 5; i <= 7; i++) { if (STEPS[i-1].skip) { addLog(`[Step ${i}] ${STEPS[i-1].label} — 건너뜀`, "info"); continue; } await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
   }
   addLog(`\n✅ 전체 완료! ${state.shorts.length}개 쇼츠 생성`, "success");
 }
@@ -322,6 +356,15 @@ async function runAll() {
 function resetAll() {
   state = { projectId:null, projectStatus:null, shorts:[], activeIdx:0, currentStep:0, loading:false };
   document.getElementById("urlInput").value = ""; hideError(); clearLog(); renderProject(); renderShorts(); updateStepUI();
+}
+
+async function resizeShort(idx) {
+  const s = state.shorts[idx];
+  if (!s) return;
+  const ar = document.getElementById(`resizeSel${idx}`).value;
+  addLog(`[리사이즈] 쇼츠 #${idx+1} → ${ar}`);
+  const d = await apiCall(`${API}/shorts/${s.id}/resize?aspect_ratio=${ar}`, { method:"POST" });
+  if (d) { state.shorts = state.shorts.map(x => x.id === s.id ? d : x); addLog(`리사이즈 완료: ${d.output_path}`, "success"); renderShorts(); }
 }
 
 renderSteps(); updateStepUI();

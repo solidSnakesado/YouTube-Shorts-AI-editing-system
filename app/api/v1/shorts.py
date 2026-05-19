@@ -6,10 +6,12 @@
 # 8~10일차 변경사항:
 #   - POST /{shorts_id}/edit: 501 스텁 -> 실제 리프레이밍 동작
 #   - aspect_ratio 쿼리 파라미터 추가
-#
 # 11~12일차 변경사항:
 #   - POST /{shorts_id}/subtitle:   자막 생성 엔드포인트 신규
 #   - POST /{shorts_id}/encode  :   최종 인코딩 엔트포인트 신규
+# 21일차 변경사항:
+#   - POST /{shorts_id}/resize:     리사이징 엔드포인트 신규
+#   - edit 엔드포인트 독스트링에 다양한 종횡비 지원 명시
 
 """
 쇼츠 클립 엔드포인트
@@ -58,24 +60,12 @@ async def edit_shorts(
     editing_svc: EditingService = Depends(get_editing_service)
 ):
     """
-    쇼츠 리프레이밍 실행 - 8~10일차 구현 완료
+    쇼츠 리프레이밍 실행
 
     POST /api/v1/shorts/{shorts_id}/edit?aspect_ratio=9:16
 
-    파이프라인에서의 위치: analyze -> **edit** (리프레이밍)
-
-    YOLOv8로 피사체 추적 -> 카마라 스무딩 -> 적응형 크롭 전략 -> 
-    FFmpeg로 16:9 -> 9:16 리프레이밍
-
-    전제 조건:
-        - analyze 완료되어 Shorts 엔티티가 DB에 존재
-        - 프로젝트의 sourcr_path에 소스 영상 파일이 존재
-
-    응답:
-        - 성공: ShortResponse (output_path 포함)
-        - 실패: 404 (쇼츠 미존재) 또는 500 (리프레이밍 실패)
-
-    이전 상태: 501 Not Implemented (스텁)
+    지원 종횡비: 9:16(쇼츠), 16:9(가로), 1:1(정사각), 4:5, 4:3, 16:10
+    YOLOv8 피사체 추적 -> 스무딩 -> 적응형 크롭 -> FFmpeg 리프레이밍
     """
 
     result = await editing_svc.reframe_clip(shorts_id, aspect_ratio)
@@ -153,4 +143,28 @@ async def encode_shorts(
     return ShortResponse(
         **result.__dict__,
         duration_sec=round(result.end_sec - result.start_sec, 3)
+    )
+
+@router.post("/{shorts_id}/resize", response_model=ShortResponse)
+async def resize_shorts(
+    shorts_id: str,
+    aspect_ratio: str = "16:9",
+    editing_svc: EditingService = Depends(get_editing_service),
+):
+    """
+    기존 영상을 다른 종횡비로 리사이징 (21일차 신규)
+
+    POST /api/v1/shorts/{shorts_id}/resize?aspect_ratio=16:9
+
+    편집 완료된 영상을 레터박스 방식으로 다른 비율로 변환
+    지원 종횡비: 9:16, 16:9, 1:1, 4:5, 4:3, 16:10
+    """
+
+    result = await editing_svc.resize_clip(shorts_id, aspect_ratio)
+    if not result:
+        raise HTTPException(status_code=500, detail="리사이징에 실패했습니다.")
+    
+    return ShortResponse(
+        **result.__dict__,
+        duration_sec=round(result.end_sec - result.start_sec, 3),
     )

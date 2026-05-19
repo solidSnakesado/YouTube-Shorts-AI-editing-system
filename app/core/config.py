@@ -1,32 +1,12 @@
 # 계층: 인프라 계층 (Core)
-# 역할: 애플리케이션 전역 환경 설정을 중앙 관리
-#       .env 파일의 값을 읽어와 Python 타입으로 자동 변환하며,
-#       잘못된 값이 들어오면 서버 시작 시점에 즉시 에러를 발생 시킨다.
-# 의존: 없음 (최하위 인프라 모듈 - 다른 모듈이 이 모듈에 의존)
-# MVA 원칙: 설정 외부화 - 환경 변수 하드코딩 금지, 환경별 설정 분리
-#
-# 6~7일차 변경사항:
-#   - LLM_MODEL_NAME 필드 추가 (GGUF 파일명 명시)
-#   - LLM_N_GPU_LAYERS 기본값 -1로 변경 (전체 GPU 오프로드)
-#   - LLM_CTX_SIZE 기본값 8192로 변경 (하이라이트 추출에 충분)
-#   - llm_model_file 프로퍼티 추가 (경로 + 파일명 조합)
-#
-# 14일차 변경사항:
-#   - VLM 서버 설정 섹션 추가 (LLAMA_SERVER_PATH, LLM_SERVER_PORT 등)
-#   - MMPROJ_MODEL_NAME 필드 추가 (멀티모달 프로젝터 파일명)
-#   - 프레임 추출 설정 섹션 추가 (FRAME_EXTRACT_* 3개)
-#   - mmproj_model_file 프로퍼티 추가
-#
-# 17일차 변경사항:
-#   - 청크 분할 설정 3개 추가 (CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC, HIGHLIGHT_IOU_THRESHOLD)
-#   - 장편 영상 대응을 위한 전사 청크 분할 기능에 사용됨
-#   - llm_model_file 프로퍼터 추가 (경로 + 파일명 조합)
-#
-# 20일차 변경사항:
-#   - 히트맵 수집 설정 4개 추가 (HEATMAP_OUTPUT_DIR, HEATMAP_RATE_LIMIT_SEC,
-#     HEATMAP_MIN_DURATION_SEC, HEATMAP_REQUEST_TIMEOUT_SEC)
-#   - YouTube "Most Replayed" 히트맵 크롤러용 (파인튜닝 데이터 수집)
-#   - heatmap_output_path 프로퍼티 추가 (디렉토리 자동 생성)
+# 역할: 애플리케이션 전역 환경 설정을 중앙 관리 (.env -> Python 타입 자동 변환)
+# 의존: 없음 (최하위 인프라 모듈)
+# 변경 이력:
+#   6~7일차:    LLM 설정 (GGUF 파일명, GPU 오프로드, 컨텍스트 크기)
+#   14일차:     VLM 서버 + 프레임 추출 설정
+#   17일차:     청크 분할 설정 (장편 영상 대응)
+#   20일차:     히트맵 수집 설정 (HEATMAP_*)
+#   21일차:     파인튜닝 데이터 준비 설정 (FINETUNE_*)
 
 """
 환경 설정 모듈
@@ -158,27 +138,21 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------
     # 히트맵 수집 (20일차 추가) - YouTube "Most Replayed" 크롤러
     # --------------------------------------------------------------
-    #
-    # 목적:
-    #   YouTube의 "Most Replayed" 히트맵 데이터를 다수 영상에서 수집하여 
-    #   21일차 멀티모달 파인튜닝 데이터셋의 라벨로 사용
-    #
-    # 동작 메커니즘:
-    #   YouTube Data API는 히트맵을 공식 노출하지 않으므로 yt-dlp의
-    #   info.heatmap 필드(InnerTube에서 파싱)를 통해 추출
-    #
-    # HEATMAP_OUTPUT_DIR:
-    #   수집 결과 JSONL 파일 저장 경로 (영상별 1라인)
-    # HEATMAP_RATE_LIMIT_SEC:
-    #   영상 간 호출 간격 (초), YouTube IP 차단 회피용 매너모드
-    # HEATMAP_MIN_DURATION_SEC:
-    #   너무 짧은 영상은 히트맵이 없거나 노이즈가 심함 - 필터 기준
-    # HEATMAP_REQUEST_TIMEOUT_SEC:
-    #   yt-dlp metadata 호출 타임아웃 (네트워크 지연 시 hang 방지)
-    HEATMAP_OUTPUT_DIR: str = "./data/heatmaps"
-    HEATMAP_RATE_LIMIT_SEC: float = 2.0
-    HEATMAP_MIN_DURATION_SEC: float = 60.0
-    HEATMAP_REQUEST_TIMEOUT_SEC: int = 30
+    # yt-dlp info.heatmap(InnerTube)으로 히트맵 추출 -> 파인튜닝 라벨로 활용
+    HEATMAP_OUTPUT_DIR: str = "./data/heatmaps"     # JSONL 저장 경로
+    HEATMAP_RATE_LIMIT_SEC: float = 2.0             # 영상 간 대기 (IP 차단 회피)
+    HEATMAP_MIN_DURATION_SEC: float = 60.0          # 최소 영상 길이 필터
+    HEATMAP_REQUEST_TIMEOUT_SEC: int = 30           # yt-dlp 타임 아웃
+
+    # --------------------------------------------------------------
+    # 파인튜닝 데이터 분비 (21일차 추가) - VLM 멀티모달 학습
+    # --------------------------------------------------------------
+    # 히트맵 피크 구간의 프레임을 추출하여 포지티브/네거티브 학습 데이터 생성
+    # 산출물(dataset.jsonl) -> 22일차 Unsolth QLoRA 파인튜닝 입력
+    FINETUNE_OUTPUT_DIR: str= "./data/finetune"     # 데이터셋 + 프레임 저장 루트
+    FINETUNE_FRAMES_PER_SEGMENT: int = 5            # 세그먼트당 추출 프레임 수
+    FINETUNE_NEGATIVE_RATIO: float = 1.0            # 네거티브/포지티브 비율 (1:1)
+    FINETUNE_MIN_PEAK_COUNT: int = 2                # 처리 대상 최소 피크 수
 
     # --------------------------------------------------------------
     # 외부 API (선택 사항)
@@ -235,46 +209,33 @@ class Settings(BaseSettings):
     
     @property
     def llm_model_file(self) -> Path:
-        """
-        LLM GGUF 모델 파일의 전체 경로 (6~7일차 추가)
-
-        LLM_MODEL_PATH가 직접 .gguf 파일이면 그대로 반환
-        디렉토리이면 LLM_MODEL_NAME과 결합하여 반환
-
-        ex> "./models/llm/" + "gemma-4-E4B-it-Q8_0.gguf"
-            -> Path("./models/llm/gemma-4-E4B-it-Q8_0.gguf")
-        """
+        """LLM GGUF 모델 전체 경로 (파일이면 그대로, 디렉토리면 + MODEL_NAME)"""
         
         path = Path(self.LLM_MODEL_PATH)
         if path.is_file() and path.suffix == ".gguf":
-            return path
-        
+            return path      
         return path / self.LLM_MODEL_NAME
     
     @property
     def mmproj_model_file(self) -> Path:
-        """
-        멀티모달 프로젝터(mmproj) 파일의 전체 경로 (14일차 추가)
-        LLM_MODEL_PATH 디렉토리 + MMPROJ_MODEL_NAME 조합
-        ex> "./models/llm/" + "mmproj-BF16.gguf" -> Path("./models/llm/mmproj-BF16.gguf")
-        """
+        """멀티모달 프로젝터(mmproj) 파일의 전체 경로 (LLM_MODEL_PATH + MMPROJ_MODEL_NAME)"""
 
         return Path(self.LLM_MODEL_PATH) / self.MMPROJ_MODEL_NAME
     
     @property
     def heatmap_output_path(self) -> Path:
-        """
-        히트맵 JSONL 출력 디렉토리 (20일차 추가)
-
-        다수 영상의 히트맵을 누적 저장하는 디렉토리
-        존재하지 않으면 자동 생성 (parents=True로 상위 디렉토리도 같이 생성)
-
-        ex> ./data/heatmaps/heatmaps_2026-05-07.jsonl
-        """
+        """히트맵 JSONL 출력 디렉토리 (자동 생성)"""
 
         p = Path(self.HEATMAP_OUTPUT_DIR)
         p.mkdir(parents=True, exist_ok=True)
+        return p
+    
+    @property
+    def finetune_output_path(self) -> Path:
+        """파인튜닝 데이터셋 디렉토리 (frames/ 서브디렉토리 포함 자동 생성)"""
 
+        p = Path(self.FINETUNE_OUTPUT_DIR)
+        p.mkdir(parents=True, exist_ok=True)
         return p
     
 # 최초 1회만 Settings 객체 생성, 이후 호출에서는 캐시된 동일 객체 반환

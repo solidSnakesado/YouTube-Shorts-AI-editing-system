@@ -1,12 +1,15 @@
 # 계층: 비즈니스 로직 계층 (Service 헬퍼)
 # 역할: FFmpeg 클립 추출,  YOLOv8 피사체 추적, 카메라 스무딩, 
-#       적응형 리프레이밍 전략, FFmpeg 크롭 실행 
-#       (editing_service.py 300줄 규칙으로 분리)
+#       적응형 리프레이밍 전략, FFmpeg 크롭 실행, (editing_service.py 300줄 규칙으로 분리)
 # 의존: 없음 (gpu_manager가 반환한 YOLO 모델을 인자로 받아 사용)
 # MVA 원칙: 인프라 책임(모델 로드/언로드)은 gpu_manager에 위임
 # 흐름: extract_clip -> detect_subjects -> smooth_trajectory -> choose_strategy
 #      -> build_crop_timeline -> run_ffmpeg_reframe
 # 8~10일차 신규 / 11~12일차 수정: extract_clip() 추가
+# 21일차 변경:
+#   - ASPECT_RATIOS에 16:10 추가, TARGET_RESOLUTIONS 딕셔너리 신규
+#   - run_ffmpeg_reframe()에서 aspect_ratio로 target 해상도 자동 계산
+#   - run_ffmpeg_resize() 신규: 기존 영상을 다른 비율로 리사이징
 
 """
 리프레이밍 엔진 -클립 추출, 피사체 추적, 스무딩, 적응형 크롭, FFmpeg 실행
@@ -22,7 +25,17 @@ from loguru import logger
 from app.core.config import settings
 
 # --- 상수 ---
-ASPECT_RATIOS           = {"9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1), "4:5": (4, 5)}
+ASPECT_RATIOS           = {
+    "9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1), 
+    "4:5": (4, 5), "4:3": (4, 3), "16:10": (16, 10)
+}
+
+# 비율별 기본 출력 해상도 (짧은 변 1080px 기준)
+TARGET_RESOLUTIONS = {
+    "9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), 
+    "4:5": (1080, 1350), "4:3": (1440, 1080), "16:10": (1728, 1080),
+}
+
 PERSON_CLASS_ID         = 0                     # COCO 데이터셋 person 클래스
 STRATEGY_STATIC         = "static"              # 고정 모드
 STRATEGY_PAN            = "pan"                 # 팬 모드
@@ -38,16 +51,7 @@ YOLO_SAMPLE_FPS         = 5                     # 초당 샘플링 프레임 수
 # 0. 클립 추출 - 소스에서 start_sec - end_sec 구간만 추출 (11~12일차 신규)
 # --------------------------------------------------------------
 async def extract_clip(source_path: str, clip_path: str, start_sec: float, end_sec: float) -> bool:
-    """
-    FFmpeg로 소스 영상에서 지정 구간만 추출 (시간 트리밍)
-
-    -ss를 -i 앞에 배치: 입력 단계 시크 (키프레임 기반, 빠름)
-    -t duration: 클립 길이 지정
-    -c copy: 재인코딩 없이 스트림 복사 (초고속)
-    -avoid_negative_ts make_zero: 트리밍 후 타임스탬프 0 기준으로 리셋
-
-    Returns: 성공 여부
-    """
+    """FFmpeg로 소스 영상에서 지정 구간만 추출 (-ss 입력 시크, -c copy 초고속)"""
 
     duration = round(end_sec - start_sec, 3)
     cmd = [
@@ -76,11 +80,7 @@ async def extract_clip(source_path: str, clip_path: str, start_sec: float, end_s
 # 1. 피사체 탐지 - YOLOv8로 프레임별 인물 위치 추적
 # --------------------------------------------------------------
 def detect_subjects(yolo_model: Any, video_path: str, sample_fps: int = YOLO_SAMPLE_FPS) -> list[dict]:
-    """
-    YOLOv8로 프레임별 피사체(인물) 위치 탐지
-    sample_fps 간격으로 샘플링하여 처리 속도를 높임
-    Returns: [{"frame_idx", "time_sec", "cx", "cy", "w", "h", "orig_w", "orig_h"}, ...]
-    """
+    """YOLOv8로 프레임별 피사체(인물) 위치 탐지, 면적 최대 박스 = 주 피사체"""
 
     logger.info(f"피사체 탐지 시작 | 영상: {Path(video_path).name} | {sample_fps}fps")
 
@@ -116,10 +116,7 @@ def detect_subjects(yolo_model: Any, video_path: str, sample_fps: int = YOLO_SAM
 # 2. 카메라 이동 스무딩 - EMA(Exponential Moveing Average) 필터
 # --------------------------------------------------------------
 def smooth_trajectory(detections: list[dict], alpha: float = SMOOTHING_ALPHA) -> list[dict]:
-    """
-    저대역 통과 필터로 카메라 이동 경로 스무딩
-    장면 전환(급격한 이동)은 스무딩 없이 즉시 점프
-    """
+    """EMA 저대역 통과 필터로 카메라 이동 경로 스무딩, 장면 전환 시 즉시 점프"""
 
     if not detections:
         return detections
@@ -147,11 +144,7 @@ def smooth_trajectory(detections: list[dict], alpha: float = SMOOTHING_ALPHA) ->
 # 3. 적응형 리프레이밍 전략 선택
 # --------------------------------------------------------------
 def choose_strategy(detections: list[dict]) -> str:
-    """
-    피사체 이동 패턴 분석 -> 리프레이밍 전략 결정
-    미탐지 >50% -> letterbox | 평균이동 <임계값 -> static
-    X축 일관이동 >80% -> pan | 그 외 -> track 
-    """
+    """피사체 이동 패턴 분석 -> 리프레이밍 전략 결정(static/pan/track/letterbox)"""
 
     if len(detections) < 2:
         return STRATEGY_STATIC
@@ -182,9 +175,7 @@ def choose_strategy(detections: list[dict]) -> str:
 # 4. 크롭 타임라인 생성 - 프레임별 크롭 좌표
 # --------------------------------------------------------------
 def build_crop_timeline(detections: list[dict], strategy: str, aspect_ratio: str = "9:16") -> list[dict]:
-    """
-    프레임별 (crop_x, crop_y, crop_w, crop_h) 타임라인 생성
-    """
+    """프레임별 (crop_x, crop_y, crop_w, crop_h) 타임라인 생성"""
 
     if not detections:
         return []
@@ -225,15 +216,17 @@ def build_crop_timeline(detections: list[dict], strategy: str, aspect_ratio: str
 # 5. FFmpeg 리프레이밍 실행 - 크롭 + 스케일링
 # --------------------------------------------------------------
 async def run_ffmpeg_reframe(source_path: str, output_path: str, timeline: list[dict], 
-    target_width: int = 1080, target_height: int = 1920) -> bool:
+    aspect_ratio: str = "9:16") -> bool:
     """
-    FFmpeg로 크롭 타임라인 기반 리프레이밍 실행
-    프로토타입 단순화: 타임라인 중앙값 크롭 고정 크롭
+    FFmpeg로 크롭 타임라인 기반 리프레이밍 실행, 프로토타입 단순화: 타임라인 중앙값 크롭 고정 크롭
+    21일차: aspect_ratio에서 target 해상도 자동 결정
     """
 
     if not timeline:
         logger.error("빈 크롭 타임라인")
         return False
+    
+    target_width, target_height = TARGET_RESOLUTIONS.get(aspect_ratio, (1080, 1920))
     
     mid = timeline[len(timeline) // 2]
     crop_x, crop_y = mid["crop_x"], mid["crop_y"]
@@ -264,4 +257,43 @@ async def run_ffmpeg_reframe(source_path: str, output_path: str, timeline: list[
         return False
     
     logger.info(f"리프레이밍 완료: {output_path}")
+    return True
+
+# --------------------------------------------------------------
+# 6. 리사이징 - 기존 영상을 다른 비율로 변환 (21일차 신규)
+# --------------------------------------------------------------
+async def run_ffmpeg_resize(source_path: str, output_path: str, aspect_ratio: str) -> bool:
+    """
+    기존 영상을 지정 비율로 리사이징 (크롭 + 스케일 또는 레터박스)
+    원본 비율과 타겟 비율을 비교하여 타겟이 더 좁으면 중앙 크롭 후 스케일, 타겟이 더 넓으면 레터박스(패딩) 후 스케일
+    """
+
+    if aspect_ratio not in TARGET_RESOLUTIONS:
+        logger.error(f"미지원 종횡비: {aspect_ratio} (지원: {list(TARGET_RESOLUTIONS.keys())})")
+        return False
+    
+    tw, th = TARGET_RESOLUTIONS[aspect_ratio]
+    target_ar = tw / th
+
+    # 레터박스 방식: 원본 비율 유지, 남는 공간은 검정 패딩
+    vf = (f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+          f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black")
+    
+    cmd = [
+        "ffmpeg", "-y", "-hwaccel", settings.FFMPEG_HWACCEL,
+        "-i", source_path, "-vf", vf,
+        "-c:v", "h264_nvenc", "-preset", settings.NVENC_PRESET,
+        "-cq", str(settings.NVENC_CQ), "-c:a", "copy", output_path,
+    ]
+
+    logger.info(f"리사이징 | {aspect_ratio} ({tw}x{th}) | {Path(source_path).name}")
+
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, stderr = await process.communicate()
+
+    if process.returncode != 0:
+        logger.error(f"리사이징 FFmpeg 실패: {stderr.decode()[:500]}")
+        return False
+    
+    logger.info(f"리사이징 완료: {output_path}")
     return True

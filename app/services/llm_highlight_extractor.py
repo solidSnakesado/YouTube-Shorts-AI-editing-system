@@ -9,6 +9,9 @@
 #   - build_highlight_prompt: 청크 dict 도 허용 (start_offset_sec 읽어 분석 범위 표시)
 #   - parse_highlight 에  chunk_start 파라미터 추가 (청크 범위 검증)
 #   - 청크 범위 벗어나는 하이라이트는 제외 (오버랩 영역에서 반대편 청크 침범 방지)
+# 21일차:
+#   - 프롬프트에 recommended_aspect_ratio 필드 추가 (AI 종횡비 추천)
+#   - _validate_highlight에서 aspect_ratio 파싱 + VALID_ASPECT_RATIOS 검증
 
 """LLM 하이라이트 추출기 - 프롬프트 생성, LLM 호출, 응답 파싱"""
 
@@ -19,8 +22,9 @@ from typing import Any
 from loguru import logger
 
 # 쇼츠 길이 제한 상수 - LLM이 자동 판단하되, 이 범위를 벗어나면 검증에서 보정
-MIN_DURATION_SEC = 10       # 최소 쇼츠 길이 (미만 시 제거)
-MAX_DURATION_SEC = 120      # 최대 쇼츠 길이 (초과 시 잘라내기)
+MIN_DURATION_SEC    = 10                                                # 최소 쇼츠 길이 (미만 시 제거)
+MAX_DURATION_SEC    = 120                                               # 최대 쇼츠 길이 (초과 시 잘라내기)
+VALID_ASPECT_RATIOS = {"9:16", "16:9", "1:1", "4:5", "4:3", "16:10"}    # 21일차
 
 # --------------------------------------------------------------
 # 프롬프트 생성
@@ -247,6 +251,11 @@ def _validate_highlight(h: dict, total_duration: float, chunk_start: float = 0.0
     except (TypeError, ValueError):
         score = 0.5
 
+    # aspect_ratio 검증 (21일차): 유효하지 않으면 기본값 "9:16"
+    ar = str(h.get("recommended_aspect_ratio", "9:16")).strip()
+    if ar not in VALID_ASPECT_RATIOS:
+        ar = "9:16"
+
     return {
         "start_sec": round(start, 3),
         "end_sec": round(end, 3),
@@ -254,16 +263,14 @@ def _validate_highlight(h: dict, total_duration: float, chunk_start: float = 0.0
         "reason": str(h.get("reason", ""))[:500],                           # DB 컬럼 보호
         "title_suggestion": str(h.get("title_suggestion", ""))[:200],
         "tags": h.get("tags", [])[:10],                                     # 태그 최대 10개
+        "aspect_ratio": ar,
     }
 
 # --------------------------------------------------------------
 # 음성 없는 영상용 시간 기반 풀백 (11~12일차 추가 / 13일차: duration_sec 제거)
 # --------------------------------------------------------------
 def create_time_based_highlights(total_duration: float, max_shorts: int) -> list[dict]:
-    """
-    음성이 없는 영상에서 시간 기간 균등 분할 하이라이트 생성
-    LLM 호출 없이 영상을 duration_sec 길이로 균등 분할 (기본 60초 간격, MAX_DURATION_SEC 이내)
-    """
+    """음성이 없는 영상에서 시간 기간 균등 분할 (기본 60초 간격)"""
 
     if total_duration <= 0:
         return []
@@ -281,6 +288,7 @@ def create_time_based_highlights(total_duration: float, max_shorts: int) -> list
             "hook_score": round(0.5 - i * 0.05, 4),
             "reason": f"시간 기반 자동 분할 #{i + 1} (음성 미감지)",
             "title_suggestion": f"하이라이트 #{i + 1}", "tags": [],
+            "aspect_ratio": "9:16",
         })
     logger.info(f"시간 기반 하이라이트: {len(highlight)}개 (음성 없음)")
     return highlight

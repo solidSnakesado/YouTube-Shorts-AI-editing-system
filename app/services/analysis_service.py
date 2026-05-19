@@ -230,8 +230,7 @@ class AnalysisService:
         if len(failed_chunk) > len(chunks) / 2:
             raise RuntimeError(f"청크 절반 이상 실패 ({len(failed_chunk)}/{len(chunks)})")
         
-        return merge_and_rerank_highlights(chunk_results, max_shorts, 
-                                           iou_threshold=settings.HIGHLIGHT_IOU_THRESHOLD)
+        return merge_and_rerank_highlights(chunk_results, max_shorts, iou_threshold=settings.HIGHLIGHT_IOU_THRESHOLD)
 
     def _process_chunks(self, chunks: list[dict], per_chunk_max: int) -> tuple[list[list[dict]], list[int]]:
         """청크별 LLM 호출 + 예외 격리 (17일차 신규), Returns: (chunk_results, failed_indices)"""
@@ -281,8 +280,9 @@ class AnalysisService:
                 hook_score=h.get("hook_score"),
                 highlight_reason=h.get("reason"),
                 title_suggestion=h.get("title_suggestion"),
-                tags_suggestion=json.dumps(h.get("tags", []), ensure_ascii=False),      # tags는 리스트 -> JSON 문자열로 변환하여 저장
-                status=ShortStatus.QUEUED,                                               # 초기 상태: 편집 대기
+                tags_suggestion=json.dumps(h.get("tags", []), ensure_ascii=False),          # tags는 리스트 -> JSON 문자열로 변환하여 저장
+                aspect_ratio=h.get("aspect_ratio", "9:16"),                                 # 21일차: AI 추천 종횡비
+                status=ShortStatus.QUEUED,                                                  # 초기 상태: 편집 대기
             )
             created = await self.shorts_repo.create(shorts)                             
             shorts_list.append(created)
