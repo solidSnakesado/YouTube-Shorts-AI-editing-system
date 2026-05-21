@@ -7,6 +7,8 @@
 #   17일차:     청크 분할 설정 (장편 영상 대응)
 #   20일차:     히트맵 수집 설정 (HEATMAP_*)
 #   21일차:     파인튜닝 데이터 준비 설정 (FINETUNE_*)
+#   22일차:     QLoRA 파인튜닝 설정 (LORA_*)
+#               Qwen2.5-VL-7B 모델 전환 (학습 + 추론 통일, Gemma 4 E4B VRAM 초과 대응)
 
 """
 환경 설정 모듈
@@ -80,30 +82,42 @@ class Settings(BaseSettings):
     YOLO_DEVICE: str = "cuda"
 
     # --------------------------------------------------------------
-    # AI 모델 - 로컬 LLM (Gemma 4 E4B, llama-cpp-python)
+    # AI 모델 - 로컬 LLM (Gemma 4 E4B 에서 Qwen2.5-VL-7B 로 변경 (학습 시 VRAM 초과 이슈로 변경 진행), llama-cpp-python)
     # --------------------------------------------------------------
     # Gemma 4 E4B Q8_0: ~8~9GB VRAM, RTX 5070 Ti (11.9GB)에 적합
     # 모델 다운로드 명령어
     #   huggingface-cli download unsloth/gemma-4-E4B-it-GGUF \
     #     --include "*Q8_0*" --local-dir ./model/llm/
-    LLM_MODEL_PATH: str = "./models/llm/"               # 로컬 GGUF 모델 파일 경로
-    LLM_MODEL_NAME: str = "gemma-4-E4B-it-Q8_0.gguf"    # GGUF 파일명 (6~7일차 추가)
-    LLM_N_GPU_LAYERS: int = -1                          # -1: 모든 레이어를 GPU에 오프로드 (12GB VRAM 충분)
-    LLM_CTX_SIZE: int = 8192                            # 하이라이트 추출에 8K 컨텍스트면 충분
+    # 22일차: Gemma 4 E4B -> Qwen2.5-VL-7B 전환
+    #   - Gemma 4 E4B는 12GB VRAM 에서 QLoRA 학습 불가 (4bit 웨이트만 ~8GB)
+    #   - Qwen2.5-VL-7B: QLoRA 4bit ~5GB, 멀티모달 벤치마크 상위, 12GB 충분
+    #   - 학습(Unsloth)과 추론(llama-server) 모델 통일
+    # 모델 다운로드 명령어:
+    #   hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF \
+    #     --include "*Q5_K_M*" --local-dir ./models/llm/
+    #   hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF \
+    #     --include "*mmproj*" --local-dir ./models/llm/
+    LLM_MODEL_PATH: str = "./models/llm/"                           # 로컬 GGUF 모델 파일 경로
+    #LLM_MODEL_NAME: str = "gemma-4-E4B-it-Q8_0.gguf"               # GGUF 파일명 (6~7일차 추가), 모델 변경으로 주석 처리
+    LLM_MODEL_NAME: str = "Qwen2.5-VL-7B-Instruct-Q5_K_M.gguf"      # GGUF 파일명
+    LLM_N_GPU_LAYERS: int = -1                                      # -1: 모든 레이어를 GPU에 오프로드 (12GB VRAM 충분)
+    LLM_CTX_SIZE: int = 8192                                        # 하이라이트 추출에 8K 컨텍스트면 충분
 
     # --------------------------------------------------------------
-    # VLM 서버 - llama-server 서브프로세스 (14일차 추가)
+    # VLM 서버 - llama-server 서브프로세스 (14일차 추가, 22일차 Qwen2.5-VL 전환)
     # --------------------------------------------------------------
-    # llama-server 네이티브 바이너리로 Gemma 4 멀티모달(텍스트 + 이미지) 추론
+    # llama-server 네이티브 바이너리로 Gemma 4 멀티모달(텍스트 + 이미지) 추론, 이전 내용(22일차에 학습시 VRAM 초과 이슈로 모델 변경)
+    # llama-server Qwen2.5-VL-7B 멀티모달(텍스트 + 이미지) 추론     # 22일차 전환
     # llama-cpp-python 대신 서브프로세스 방식 채택 이유:
     #   - llama.cpp 최신 libmtmd 멀티모달 지원 활용
     #   - 프로세스 종료 시 VRAM이 OS 수준에서 완전 해제
     #   - OpenAI 호환 API(/v1/chat/completions) -> 기존 코드 재활용 가능
-    LLAMA_SERVER_PATH: str = "./bin/llama-server"       # 빌드된 바이너리 경로
-    MMPROJ_MODEL_NAME: str = "mmproj-BF16.gguf"         # 멀티모달 프로젝터 파일명 (~800MB)
-    LLM_SERVER_HOST: str = "127.0.0.1"                  # 로컬 전용 (외부 노출 금지)
-    LLM_SERVER_PORT: int = 8090                         # FastAPI(8000)와 충돌 방지
-    LLM_SERVER_TIMEOUT: int = 60                        # 서버 시작 대기 타임아웃 (초)
+    LLAMA_SERVER_PATH: str = "./bin/llama-server"                               # 빌드된 바이너리 경로
+    # MMPROJ_MODEL_NAME: str = "mmproj-BF16.gguf"                               # 멀티모달 프로젝터 파일명 (~800MB), 이전 내용(22일차에 학습시 VRAM 초과 이슈로 모델 변경)
+    MMPROJ_MODEL_NAME: str = "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"           # 멀티모달 프로젝터 파일명
+    LLM_SERVER_HOST: str = "127.0.0.1"                                          # 로컬 전용 (외부 노출 금지)
+    LLM_SERVER_PORT: int = 8090                                                 # FastAPI(8000)와 충돌 방지
+    LLM_SERVER_TIMEOUT: int = 60                                                # 서버 시작 대기 타임아웃 (초)
 
     # --------------------------------------------------------------
     # 프레임 추출 — VLM 멀티모달 입력용 (14일차 추가)
@@ -111,6 +125,9 @@ class Settings(BaseSettings):
     # Gemma 4 비주얼 토큰 예산:
     #   560px -> 프레임당 ~280토큰 -> 20프레임 = ~5,600토큰 (일반 분석)
     #   1120px -> 프레임당 ~1,120토큰 -> 10프레임 = ~11,200토큰 (OCR/세부)
+    # Qwen2.5-VL 비주얼 토큰 예산:
+    #   기본 토큰 범위 4~16384, min_pixels/max_pixels로 제어
+    #   560px -> 프레임당 ~200~300토큰 -> 20프레임 = ~4,000~6,000토큰
     FRAME_EXTRACT_INTERVAL_SEC: float = 10.0
     FRAME_EXTRACT_MAX_FRAMES: int = 20
     FRAME_EXTRACT_RESOLUTION: int = 560
@@ -155,9 +172,20 @@ class Settings(BaseSettings):
     FINETUNE_MIN_PEAK_COUNT: int = 2                # 처리 대상 최소 피크 수
 
     # --------------------------------------------------------------
+    # QLoRA 파인튜닝 (22일차 추가) - Unsloth LoRA 어댑터
+    # --------------------------------------------------------------
+    # Gemma 4 E4B 4bit + QLoRA: ~4GB 베이스 + 학습 오버헤드 -> 12GB 내, 이전 내용(22일차에 학습시 VRAM 초과 이슈로 모델 변경)
+    # Qwen2.5-VL-7B 4bit + QLoRA: ~5GB 베이스 + 학습 오버헤드 -> 12GB 내 안정
+    # 학습 완료 후 adapter/ 디렉토리에 LoRA 가중치 저장 (~100MB)
+    # LORA_BASE_MODEL: str = "unsloth/gemma-4-E4B-it"                                   # HF 모델 ID (4bit 자동 양자화), 이전 내용(22일차에 학습시 VRAM 초과 이슈로 모델 변경)
+    LORA_BASE_MODEL: str = "unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit"            # Unsloth 4bit 사전 양자화
+    LORA_OUTPUT_DIR: str ="./models/lora/heatmap_adapter"                               # 어댑터 저장 경로
+    LORA_ENABLED: bool = False                                                          # True면 추론 시 LoRA 어댑터 로드
+
+    # --------------------------------------------------------------
     # 외부 API (선택 사항)
     # --------------------------------------------------------------
-    # 빈 문자열이면 로컬 Gemma 4 사용, 값이 있으면 API 사용
+    # 빈 문자열이면 로컬 llm 사용, 값이 있으면 API 사용
     OPENAI_API_KEY: str = ""
 
     # --------------------------------------------------------------
@@ -237,6 +265,12 @@ class Settings(BaseSettings):
         p = Path(self.FINETUNE_OUTPUT_DIR)
         p.mkdir(parents=True, exist_ok=True)
         return p
+    
+    @property
+    def lora_adapter_path(self) -> Path:
+        """LoRA 어댑터 디렉토리 (adapter/ 서브디렉토리)"""
+
+        return Path(self.LORA_OUTPUT_DIR) / "adapter"
     
 # 최초 1회만 Settings 객체 생성, 이후 호출에서는 캐시된 동일 객체 반환
 @lru_cache

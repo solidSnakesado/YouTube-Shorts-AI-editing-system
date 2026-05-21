@@ -1,34 +1,18 @@
 # 계층: 비즈니스 로직 계층 (Service 헬퍼)
-# 역할: VLM(Vision-Language Model) 멀티모달 분석의 전체 오케스트레이션
-#       llama-server 시작 -> 프레임 추출 -> VLM API 호출 -> 응답 파싱 -> 서버 종료
-#       analysis_service.py의 300줄 규칙 준수를 위해 분리된 헬퍼 모듈
-# 의존: 
-#   - app.core.config (서버 포트, 프레임 설정)
-#   - app.core.llm_server (서버 시작/종료)
-#   - app.services.frame_extractor (영상 프레임 추출)
-#   - app.services.llm_highlight_extractor (parse_highlight 재사용)
-# MVA 원칙: VLM 호출 로직은 서비스 헬퍼, GPU/서버 관리는 인프라에 위임
-#
-# 14~15일차 신규: 
-#   - is_vlm_available(): VLM 모드 사용 가능 여부 확인
-#   - run_vlm_analysis(): 전체 VLM 분석 파이프라인 오케스트레이션 (async)
-#   - _build_vlm_messages(): OpenAI 호환 멀티모달 메시지 생성
-#   - _build_vlm_text_prompt(): 프레임 타임스탬프 + 전사 텍스트 프롬프트
-#   - _call_vlm_api(): llama-server HTTP API 호출
-#
-# 호출: analysis_service -> is_vlm_available() -> run_vlm_analysis()
-#   내부: start_llm_server -> extract_frames -> _build_vlm_messages -> _call_vlm_api -> parse_highlight -> stop_llm_server
+# 역할: VLM 멀티모달 분석 오케스트레이션 (llama-server 또는 LoRA 직접 추론)
+# 의존: config, llm_server, frame_extractor, llm_highlight_extractor
+# 14~15일차 신규: llama-server 기반 VLM 파이프라인
+# 22일차: LoRA 어댑터 Unsloth/Transformers 직접 추론 분기 추가 + Qwen2.5-VL-7B 모델 전환
 
 """
 VLM 클라이언트 - 영상 프레임 + 텍스트 통합 분석 오케스트레이터
-
-텍스트만 분석하던 기존 LLM 파이프라인을 대체하여 영상 프레임과 전사 텍스트를 동시에 VLM에 전달하여
-시각적 + 언어적 하이라이트 추출
+22일차: Qwen2.5-VL-7B 기반, LoRA 추론 시 Unsloth FastVisionModel 사용
 """
 
 import asyncio
 import json
 from pathlib import Path
+from typing import Optional
 from urllib.request import Request, urlopen
 
 from loguru import logger
@@ -41,15 +25,7 @@ from app.services.frame_extractor import extract_frames
 from app.services.llm_highlight_extractor import parse_highlights, MIN_DURATION_SEC, MAX_DURATION_SEC
 
 def is_vlm_available() -> bool:
-    """
-    VLM 멀티모달 분석 사용 가능 여부 확인
-
-    조건: llama-server 바이너리 + GGUF 모델 + mmproj 프로젝터가 모두 존재
-    하나라도 없으면 False -> 텍스트 전용 LLM 폴백
-
-    Returns:
-        True: VLM 사용 가능, False: 텍스트 전용 폴백
-    """
+    """VLM 사용 가능 여부 (llama-server + GGUF + mmproj 존재 확인)"""
 
     server_ok = Path(settings.LLAMA_SERVER_PATH).is_file()
     mmproj_ok = settings.mmproj_model_file.is_file()
@@ -61,48 +37,45 @@ def is_vlm_available() -> bool:
 
     return server_ok and mmproj_ok
 
-async def run_vlm_analysis(source_path: str, transcript_data: dict, max_shorts: int = 5) -> list[dict]:
+async def run_vlm_analysis(
+        source_path: str, transcript_data: dict, 
+        max_shorts: int = 5, lora_adapter_path: Optional[str] = None,
+) -> list[dict]:
     """
     VLM 멀티모달 분석 전체 파이프라인 실행
-    영상 프레임 + 전사 텍스트를 VLM에 전달하여 시각 + 언어 기반 하이라이트 추출
-    음성이 없는 영상에서도 시각 정보만으로 하이라이트 선정 가능
-
-    Args:
-        source_path: 소스 영상 파일 경로 (temp/{pid}/source.mp4)
-        transcript_data: Whisper 전사 결과 dict (segments 포함)
-        max_shorts: 추출할 최대 쇼츠 수
-    
-    Returns:
-        parse_highlights()가 반환하는 검증된 하이라이트 목록
+    lora_adapter_path 지정 시: Unsloth/Transformers 직접 추론 (22일차)
+    미지정 시: llama-server 서브프로세스 방식 (기존 14~15일차)
     """
 
+    # 공통: 프레임 추출
+    frames = await extract_frames(Path(source_path))
+    if not frames:
+        logger.warning("프레임 추출 결과 없음 - 텍스트 전용 프롬프트로 폴백")
+
+    total_duration = transcript_data.get("duration_sec", 0)
+
+    # LoRA 분기: Unsloth/Transformers 직접 추론 (22일차)
+    if lora_adapter_path and Path(lora_adapter_path).exists():
+        logger.info(f"LoRA 추론 모드: {lora_adapter_path}")
+        response_text = await asyncio.get_event_loop().run_in_executor(
+            None, _run_lora_inference, frames, transcript_data, max_shorts, lora_adapter_path,
+        )
+        highlights = parse_highlights(response_text, total_duration, max_shorts)
+        logger.info(f"LoRA VLM 분석 완료: {len(highlights)}개 하이라이트")
+        return highlights
+
+    # 기존 경로: llama-server 서브프로세스
     loop = asyncio.get_event_loop()
     proc = None
-
     try:
-        # 1. llama-server 시작 (멀티모달 모드) - 동기 -> 스레드 풀
         logger.info("VLM 분석 시작: llama-server 멀티모달 모드")
         proc = await loop.run_in_executor(None, start_llm_server, True)
-
-        # 2. 영상 프레임 추출 - 비동기 (FFmpeg 서브프로세스)
-        frames = await extract_frames(Path(source_path))
-        if not frames:
-            logger.warning("프레임 추출 결과 없음 - 텍스트 전용 프롬프트로 폴백")
-
-        # 3. VLM 메시지 생성 (이미지 + 텍스트 통합)
         messages = _build_vlm_messages(frames, transcript_data, max_shorts)
-
-        # 4. VLM API 호출 - 동기(urllib) -> 스레드 풀
         response_text = await loop.run_in_executor(None, _call_vlm_api, messages)
-
-        # 응답 파싱 (기존 parse_highlights 재사용)
-        total_duration = transcript_data.get("duration_sec", 0)
         highlights = parse_highlights(response_text, total_duration, max_shorts)
-
         logger.info(f"VLM 분석 완료: {len(highlights)}개 하이라이트 추출")
         return highlights
     finally:
-        # 6. llama-server 종료 (VRAM 자동 해제)
         if proc is not None:
             await loop.run_in_executor(None, stop_llm_server, proc)
 
@@ -233,8 +206,7 @@ def _call_vlm_api(messages: list[dict]) -> str:
     payload = json.dumps({
         "messages": messages,
         "temperature": 0.3,         # 하이라이트 추출은 정확성 우선
-        "top_p": 0.95,              # Gemma 4 권장값
-        "top_k": 64,                # Gemma 4 권장값
+        "top_p": 0.95,              
         "max_tokens": 2000,
     }).encode("utf-8")
 
@@ -261,4 +233,61 @@ def _call_vlm_api(messages: list[dict]) -> str:
         raise RuntimeError(f"VLM 응답 파싱 실패: {e} | body: {str(body)[:300]}")
     
     logger.info(f"VLM 응답 수신: {len(result)}자")
+    return result
+
+# --------------------------------------------------------------
+# LoRA 추론 - Unsloth/Transformers 직접 (22일차, Qwen2.5-VL-7B)
+# --------------------------------------------------------------
+
+def _run_lora_inference(
+    frames: list[dict], transcript_data: dict,
+    max_shorts: int, adapter_path: str,
+) -> str:
+    """Unsloth FastVisionModel + LoRA 어댑터로 멀티모달 추론 (동기, run_in_executor로 호출)"""
+
+    from unsloth import FastVisionModel
+    from PIL import Image
+    import base64
+    import io
+
+    logger.info("LoRA 모델 로드 시작 (Qwen2.5-VL-7B)...")
+    model, tokenizer = FastVisionModel.from_pretrained(
+        model_name=adapter_path,
+        load_in_4bit=True,
+        max_seq_length=2048,
+    )
+    FastVisionModel.for_inference(model)
+
+    # 이미지 로드 (base64 -> PIL, 최대 3장)
+    images = []
+    for frame in frames[:3]:
+        img_bytes = base64.b64decode(frame["base64"])
+        images.append(Image.open(io.BytesIO(img_bytes)))
+
+    # 프롬프트 생성 (기존 _build_vlm_text_prompt 재사용)
+    text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
+
+    # Qwen2.5-VL 메시지 구성
+    content = [{"type": "image"} for _ in images]
+    content.append({"type": "text", "text": text_prompt})
+    messages = [{"role": "user", "content": content}]
+
+    # 토크나이즈 + 이미지 처리
+    from transformers import AutoProcessor
+    processor = AutoProcessor.from_pretrained(adapter_path)
+    inputs = processor.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True,
+        return_tensors="pt", return_dict=True,
+    ).to(model.device)
+
+    output_ids = model.generate(**inputs, max_new_tokens=2000, temperature=0.3)
+    result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    # 모델 해제
+    del model, tokenizer, processor
+    import gc, torch
+    gc.collect()
+    torch.cuda.empty_cache()
+    logger.info("LoRA 추론 완료, VRAM 해제")
+
     return result

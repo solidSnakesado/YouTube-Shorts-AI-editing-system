@@ -9,6 +9,7 @@
 #   - LLM 로드 / 언로드를 extract_highlight() 에만 둠 (청크 루프 중 실수 방지)
 #   - 청크 루프 + try/except 격리 (실패율 절반 초과 시 전체 실패)
 #   - transcript_chunker 사용 (split_transcript_into_chunks + merge_and_rerank_highlights)
+# 22일차: LoRA 어댑터 로드 분기 추가 (LORA_ENABLED=True 시 파인튜닝된 모델 사용)
 
 """
 분석 서비스
@@ -120,8 +121,14 @@ class AnalysisService:
         try:
             has_speech = any(seg.get("text", "").strip() for seg in transcript_data.get("segments", []))
 
-            # VLM 우선(14~15일차) -> 텍스트 LLM 청크 분할 (17일차) -> 시간 분할
-            if is_vlm_available() and project.source_path:
+            # VLM 우선(14~15일차) -> LoRA VLM(22일차) -> 텍스트 LLM 청크 분할 (17일차) -> 시간 분할
+            if settings.LORA_ENABLED and settings.lora_adapter_path.exists() and project.source_path:
+                logger.info(f"LoRA 어댑터 사용: {settings.lora_adapter_path}")
+                highlights = await run_vlm_analysis(
+                    project.source_path, transcript_data, max_shorts,
+                    lora_adapter_path=str(settings.lora_adapter_path),
+                )
+            elif is_vlm_available() and project.source_path:
                 highlights = await run_vlm_analysis(project.source_path, transcript_data, max_shorts)
             elif has_speech:
                 # 17일차: LLM 로드 책임을 여기로 이동 (청크 루프 중 실수 방지)
