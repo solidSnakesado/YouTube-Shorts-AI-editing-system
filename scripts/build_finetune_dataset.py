@@ -74,6 +74,10 @@ def _parse_args() -> argparse.Namespace:
         "--neg-ratio", type=float, default=None,
         help=f"네거티브/포지티브 비율 (기본: {settings.FINETUNE_NEGATIVE_RATIO})",
     )
+    parser.add_argument(
+        "--mode", type=str, default="classifier", choices=["classifier", "generator"],
+        help="데이터셋 모드: classifier(판별기) 또는 generator(생성기) (기본: classifier)",
+    )
     
     return parser.parse_args()
 
@@ -99,7 +103,8 @@ async def _run(args: argparse.Namespace) -> None:
         output_dir=output_dir,
         min_peak_count=args.min_peaks,
         frames_per_segment=args.frames,
-        negative_ratio=args.neg_ratio
+        negative_ratio=args.neg_ratio,
+        mode=args.mode,
     )
 
     logger.info("=" * 60)
@@ -108,6 +113,7 @@ async def _run(args: argparse.Namespace) -> None:
     logger.info(f"  최소 피크: {builder.min_peak_count}개")
     logger.info(f"  프레임/세그먼트: {builder.frames_per_segment}장")
     logger.info(f"  네거티브 비율: {builder.negative_ratio}")
+    logger.info(f"  모드: {builder.mode}")
     logger.info("=" * 60)
 
     # 빌드 실행

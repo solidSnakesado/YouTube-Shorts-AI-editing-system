@@ -1,16 +1,11 @@
 # 계층: 스크립트 (CLI 진입점)
-# 역할: Unsloth QLoRA 파인튜닝 실행 - Gemma 4 E4B 멀티모달 하이라이트 판별
+# 역할: Unsloth QLoRA 파인튜닝 실행 - Qwen2.5-VL-7B 멀티모달 하이라이트 판별
 # 의존: config.py, unsloth, transformers, trl, datasets, Pillow
 # 22일차 신규: dataset.jsonl -> QLoRA 학습 -> LoRA 어댑터 저장
 #   Gemma 4 E4B -> Qwen2.5-VL-7B 전환 (12GB VRAM 대응)
 #
-# 실행 방법:
-#   uv run python -m scripts.train_qlora
-#   uv run python -m scripts.train_qlora --epochs 5 --batch-size 2
-#
-# 사전 설치:
-#   pip install unsloth --break-system-packages
-#   pip install trl datasets pillow --break-system-packages
+# 실행 방법: uv run python -m scripts.train_qlora [--adapter-type classifier|generator]
+# 사전 설치: uv pip install unsloth trl datasets pillow
 
 """
 QLoRA 파인튜닝 스크립트 - Qwen2.5-VL-7B 멀티모달 하이라이트 판별 학습
@@ -22,7 +17,6 @@ Unsloth FastVisionModel 사용 (12GB VRAM 에서 4bit QLoRA ~5GB)
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -153,7 +147,7 @@ def run_training(
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",
         ],
-        lora_dropout=0.0,       # Unsloth 최적화: dropout=0 필수, 0 이와의 값이면 LoRA 레이어 최적화 패칭이 생략되어 tokenizer 초기화 실패
+        lora_dropout=0.0,       # Unsloth 최적화: dropout=0 필수, 0 이외의 값이면 LoRA 레이어 최적화 패칭이 생략되어 tokenizer 초기화 실패
         use_rslora=True,
     )
 
@@ -269,6 +263,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=2e-4, help="학습률 (기본: 2e-4)")
     parser.add_argument("--lora-r", type=int, default=8, help="LoRA rank (기본: 8)")
     parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha (기본: 16)")
+    parser.add_argument("--adapter-type", type=str, default="classifier", choices=["classifier", "generator"], help="어댑터 타입 (기본: classifier)")
     return parser.parse_args()
 
 def main() -> None:
@@ -276,9 +271,15 @@ def main() -> None:
     dataset_path = Path(args.dataset) if args.dataset else (
         settings.finetune_output_path / "dataset.jsonl"
     )
-    output_dir = Path(args.output) if args.output else Path(settings.LORA_OUTPUT_DIR)
+    if args.output:
+        output_dir = Path(args.output) 
+    elif args.adapter_type == "generator":
+        output_dir = Path(settings.LORA_OUTPUT_DIR).parent / "heatmap_generator"
+    else:
+        output_dir = Path(settings.LORA_OUTPUT_DIR)
 
     logger.info(f"데이터셋: {dataset_path}")
+    logger.info(f"어댑터 타입: {args.adapter_type}")
     logger.info(f"출력 경로: {output_dir}")
 
     run_training(

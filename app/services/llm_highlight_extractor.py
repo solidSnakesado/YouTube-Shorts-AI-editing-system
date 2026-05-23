@@ -192,7 +192,7 @@ def _extract_json(text: str) -> dict | None:
         pass
 
     # 2차: ```json...``` 마크다운 코드 블록 내부 추출
-    code_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    code_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if code_match:
         try:
             return json.loads(code_match.group(1))

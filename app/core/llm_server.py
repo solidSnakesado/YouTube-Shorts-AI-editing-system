@@ -14,10 +14,10 @@
 #   - _wait_for_health(): /health 엔드포인트 폴링으로 서버 준비 확인
 #
 # 왜 llm-server 서브프로세스인가?
-#   기존 llama-cpp-python(Python 바인딩)의 Gemma 4 멀티 모달 호환성이 불확실.
 #   llama.cpp 네이티브 서버는 libmtmd 멀티모달을 안정적으로 지원하며,
 #   서브프로세스 종료 시 VRAM이 OS 수준에서 완전 해제되는 이점도 있음.
 #   OpenAI 호환 API(/v1/chat/completions)로 통신하므로 기존 코드 재활용 가능.
+# 22일차: Qwen2.5-VL-7B 전환에 따른 샘플링 파라미터 및 에러 메시지 업데이트
 
 """
 LLM 서버 관리자 - llama-server 서브프로세스 생명주기 관리
@@ -85,18 +85,18 @@ def start_llm_server(multimodal: bool = False) -> subprocess.Popen:
     # GGUF 모델 파일 경로 확정 (gpu_manager의 기존 탐색 로직 재활용)
     model_path = _resolve_gguf_path()
 
-    # 기본 실행 명령어 - Gemma 4 권장 샘플링 파라미터 적용
+    # 기본 실행 명령어 - Qwen2.5-VL-7B 범용 샘플링 파라미터
     cmd = [
         str(server_path),
         "-m", str(model_path),
         "--port", str(settings.LLM_SERVER_PORT),
         "--host", settings.LLM_SERVER_HOST,
-        "--temp", "1.0",                            # Gemma 4 권장
-        "--top-p", "0.95",                          # Gemma 4 권장
-        "--top-k", "64",                            # Gemma 4 권장
+        "--temp", "0.3",                            # 하이라이트 추출: 정확성 우선
+        "--top-p", "0.95",                          
         "--ctx-size", str(settings.LLM_CTX_SIZE),
         "--batch-size", "1024",
-        "--ubatch-size", "1024"
+        "--ubatch-size", "1024",
+        "-ngl", str(settings.LLM_N_GPU_LAYERS),
     ]
 
     # 멀티모달 모드: mmproj 프로젝터 + 이미지 토큰 제한 추가
@@ -106,11 +106,12 @@ def start_llm_server(multimodal: bool = False) -> subprocess.Popen:
             raise FileNotFoundError(
                 f"mmproj 파일을 찾을 수 없습니다: {mmproj_path}\n"
                 f"다운로드 방법:\n"
-                f"  huggingface-cli download unsloth/gemma-4-E4B-it-GGUF \\\n"
-                f"      --local-dir {settings.LLM_MODEL_PATH} "
-                f"--include '*mmproj*'"
+                f"  hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF \\\n"
+                f"      --include '*mmproj*' "
+                f"--local-dir {settings.LLM_MODEL_PATH}"
             )
         cmd += ["--mmproj", str(mmproj_path),
+                "--image-min-tokens", "1024",        # Qwen-VL grounding 정확도 권장 값
                 "--image-max-tokens", str(settings.FRAME_EXTRACT_RESOLUTION)]
         
     mode_label = "멀티모달(VLM)" if multimodal else "텍스트 전용"

@@ -28,8 +28,10 @@ class DatasetBuilder:
         min_peak_count: Optional[int] = None,
         frames_per_segment: Optional[int] = None,
         negative_ratio: Optional[float] = None,
+        mode: str = "classifier",
     ):
         self.heatmap_path = Path(heatmap_path)
+        self.mode = mode    # "classifier" (판별기: 하이라이트/일반) 또는 "generator" (생성기: JSON)
         self.output_dir = output_dir or settings.finetune_output_path
         self.frames_dir = self.output_dir / "frames"
         self.frames_dir.mkdir(parents=True, exist_ok=True)
@@ -139,7 +141,7 @@ class DatasetBuilder:
                     continue
                 samples.append(self._build_sample(
                     vid, title, duration,
-                    peak["start_sec"], peak["end_sec"], frames, "하이라이트",
+                    peak["start_sec"], peak["end_sec"], frames, "하이라이트", self.mode
                 ))
                 self._stats["positive_samples"] += 1
             
@@ -152,7 +154,7 @@ class DatasetBuilder:
                 if not frames:
                     continue
                 samples.append(self._build_sample(
-                    vid, title, duration, seg_start, seg_end, frames, "일반",
+                    vid, title, duration, seg_start, seg_end, frames, "일반", self.mode
                 ))
                 self._stats["negative_samples"] += 1
 
@@ -203,25 +205,37 @@ class DatasetBuilder:
         video_id: str, title: str, duration: float,
         seg_start: float, seg_end: float,
         frame_paths: list[str], label: str,
+        mode: str = "classifier",
     ) -> dict:
-        return {
-            "instruction": "이 게임 영상 프레임들을 보고 시청자가 많이 다시 본 하이라이트 구간인지 판단하세요.",
-            "images": frame_paths,
-            "metadata": {
-                "video_id": video_id,
-                "video_title": title,
-                "duration_sec": duration,
-                "segment_start": seg_start,
-                "segment_end": seg_end,
-                "position_ratio": round(seg_start / duration, 3) if duration > 0 else 0.0
-            },
-            "output": label,
+        metadata = {
+            "video_id": video_id, "video_title": title, "duration_sec": duration,
+            "segment_start": seg_start, "segment_end": seg_end,
+            "position_ratio": round(seg_start / duration, 3) if duration > 0 else 0.0
         }
+        if mode == "generator":
+            # 생성기: 하이라이트 구간은 전체 JSON, 비피크 구간은 빈 리스트
+            if label == "하이라이트":
+                output = json.dumps({"highlights": [{
+                    "start_sec": seg_start, "end_sec": seg_end,
+                    "hook_score": 0.9, "reason": "시청자가 많이 다시 본 구간",
+                    "title_suggestion": title[:30] if title else "하이라이트",
+                    "tags": ["게임", "하이라이트"],
+                    "recommended_aspect_ratio": "16:9",
+                }]}, ensure_ascii=False)
+            else:
+                output = json.dumps({"highlights": []}, ensure_ascii=False)
+            instruction = (
+                "영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. "
+                "하이라이트가 없으면 빈 리스트를 반환하세요."
+            )
+        else:
+            output = label
+            instruction = "이 게임 영상 프레임들을 보고 시청자가 많이 다시 본 하이라이트 구간인지 판단하세요."
+        return {"instruction": instruction, "images": frame_paths, "metadata": metadata, "output": output}
 
     # --------------------------------------------------------------
     # 네거티브 세그먼트 선택
     # --------------------------------------------------------------
-
     @staticmethod
     def _pick_negative_segments(peaks: list[dict], duration: float, count: int) -> list[tuple[float, float]]:
         """피크와 겹치지 않는 구간에서 네거티브 세그먼트 랜덤 선택"""
@@ -252,7 +266,6 @@ class DatasetBuilder:
     # --------------------------------------------------------------
     # 영상 다운로드
     # --------------------------------------------------------------
-
     async def _download_video(self, video_id: str, output_path: Path) -> None:
         """yt-dlp로 최저 화질 다운로드 (프레임 추출용)"""
 
@@ -278,7 +291,6 @@ class DatasetBuilder:
     # --------------------------------------------------------------
     # JSONL 저장
     # --------------------------------------------------------------
-
     @staticmethod
     def _append_samples(output_path: Path, samples: list[dict]) -> None:
         if not samples:

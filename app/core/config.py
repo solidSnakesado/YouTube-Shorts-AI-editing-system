@@ -179,7 +179,8 @@ class Settings(BaseSettings):
     # 학습 완료 후 adapter/ 디렉토리에 LoRA 가중치 저장 (~100MB)
     # LORA_BASE_MODEL: str = "unsloth/gemma-4-E4B-it"                                   # HF 모델 ID (4bit 자동 양자화), 이전 내용(22일차에 학습시 VRAM 초과 이슈로 모델 변경)
     LORA_BASE_MODEL: str = "unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit"            # Unsloth 4bit 사전 양자화
-    LORA_OUTPUT_DIR: str ="./models/lora/heatmap_adapter"                               # 어댑터 저장 경로
+    LORA_OUTPUT_DIR: str ="./models/lora/heatmap_adapter"                               # 판별기 어댑터 경로
+    LORA_GENERATOR_DIR: str = "./models/lora/heatmap_generator"                         # 생성기 어댑터 경로
     LORA_ENABLED: bool = False                                                          # True면 추론 시 LoRA 어댑터 로드
 
     # --------------------------------------------------------------
@@ -268,9 +269,15 @@ class Settings(BaseSettings):
     
     @property
     def lora_adapter_path(self) -> Path:
-        """LoRA 어댑터 디렉토리 (adapter/ 서브디렉토리)"""
+        """판별기 LoRA 어댑터 경로"""
 
         return Path(self.LORA_OUTPUT_DIR) / "adapter"
+    
+    @property
+    def lora_generator_path(self) -> Path:
+        """생성기 LoRA 어댑터 경로"""
+
+        return Path(self.LORA_GENERATOR_DIR) / "adapter"
     
 # 최초 1회만 Settings 객체 생성, 이후 호출에서는 캐시된 동일 객체 반환
 @lru_cache

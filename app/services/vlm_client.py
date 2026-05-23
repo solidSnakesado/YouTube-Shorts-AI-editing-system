@@ -1,19 +1,15 @@
-# 계층: 비즈니스 로직 계층 (Service 헬퍼)
-# 역할: VLM 멀티모달 분석 오케스트레이션 (llama-server 또는 LoRA 직접 추론)
-# 의존: config, llm_server, frame_extractor, llm_highlight_extractor
-# 14~15일차 신규: llama-server 기반 VLM 파이프라인
-# 22일차: LoRA 어댑터 Unsloth/Transformers 직접 추론 분기 추가 + Qwen2.5-VL-7B 모델 전환
+# 계층: 비즈니스 로직 계층 (Service 헬퍼) | 의존: config, llm_server, frame_extractor
+# 역할: VLM 멀티모달 분석 오케스트레이션 (llama-server / 생성기 LoRA / 판별기 LoRA)
+# 23일차: 생성기 -> 판별기 LoRA 순차 파이프라인 추가
 
-"""
-VLM 클라이언트 - 영상 프레임 + 텍스트 통합 분석 오케스트레이터
-22일차: Qwen2.5-VL-7B 기반, LoRA 추론 시 Unsloth FastVisionModel 사용
-"""
+"""VLM 클라이언트 - 영상 프레임 + 텍스트 통합 분석 (Qwen2.5-VL-7B + LoRA)"""
 
 import asyncio
 import json
 from pathlib import Path
 from typing import Optional
 from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 from loguru import logger
 
@@ -37,44 +33,70 @@ def is_vlm_available() -> bool:
 
     return server_ok and mmproj_ok
 
+def _is_server_running() -> bool:
+    """llama-server가 이미 실행 중인지 /health 엔드포인트로 확인"""
+
+    url = f"http://{settings.LLM_SERVER_HOST}:{settings.LLM_SERVER_PORT}/health"
+    try:
+        resp = urlopen(url, timeout=2)
+        return resp.status == 200
+    except (URLError, OSError):
+        return False
+
 async def run_vlm_analysis(
         source_path: str, transcript_data: dict, 
         max_shorts: int = 5, lora_adapter_path: Optional[str] = None,
 ) -> list[dict]:
-    """
-    VLM 멀티모달 분석 전체 파이프라인 실행
-    lora_adapter_path 지정 시: Unsloth/Transformers 직접 추론 (22일차)
-    미지정 시: llama-server 서브프로세스 방식 (기존 14~15일차)
-    """
+    """VLM 멀티모달 분석 파이프라인 실행
+    LORA_ENABLED=true: 생성기 LoRA -> 판별기 LoRA 순차 실행
+    lora_adapter_path 직접 지정: 해당 어댑터 단독 실행 (evaluate_lora 등)
+    기본: llama-server 서브프로세스"""
 
-    # 공통: 프레임 추출
     frames = await extract_frames(Path(source_path))
     if not frames:
         logger.warning("프레임 추출 결과 없음 - 텍스트 전용 프롬프트로 폴백")
-
     total_duration = transcript_data.get("duration_sec", 0)
+    loop = asyncio.get_event_loop()
 
-    # LoRA 분기: Unsloth/Transformers 직접 추론 (22일차)
+    # 직접 어댑터 지정 (evaluate_lora.py 등 외부 호출)
     if lora_adapter_path and Path(lora_adapter_path).exists():
-        logger.info(f"LoRA 추론 모드: {lora_adapter_path}")
-        response_text = await asyncio.get_event_loop().run_in_executor(
-            None, _run_lora_inference, frames, transcript_data, max_shorts, lora_adapter_path,
-        )
-        highlights = parse_highlights(response_text, total_duration, max_shorts)
-        logger.info(f"LoRA VLM 분석 완료: {len(highlights)}개 하이라이트")
-        return highlights
+        logger.info(f"LoRA 단독 추론: {lora_adapter_path}")
+        text = await loop.run_in_executor(
+            None, _run_lora_inference, frames, transcript_data, max_shorts, lora_adapter_path)
+        return parse_highlights(text, total_duration, max_shorts)
+    
+    # LoRA 파이프라인: 생성기 -> 판별기 순차 실행
+    gen_path = settings.lora_generator_path
+    cls_path = settings.lora_adapter_path
+    if settings.LORA_ENABLED and gen_path.exists():
+        logger.info("LoRA 파이프라인: 생성기 -> 판별기")
+        gen_text = await loop.run_in_executor(
+            None, _run_lora_inference, frames, transcript_data, max_shorts, str(gen_path))
+        candidates = parse_highlights(gen_text, total_duration, max_shorts)
+        logger.info(f"생성기 결과: {len(candidates)}개 후보")
+        if not candidates:
+            return []
+        if cls_path.exists():
+            verified = await loop.run_in_executor(None, _verify_highlights, frames, candidates, str(cls_path))
+            logger.info(f"판별기 결과: {len(verified)}/{len(candidates)}개 통과")
+            if not verified:
+                logger.warning("판별기 전체 탈락 - 생성기 결과 그대로 반환 (판별기 품질 개선 필요)")
+                return candidates
+            return verified
+        return candidates
 
     # 기존 경로: llama-server 서브프로세스
-    loop = asyncio.get_event_loop()
     proc = None
+    external_server = _is_server_running()
     try:
         logger.info("VLM 분석 시작: llama-server 멀티모달 모드")
-        proc = await loop.run_in_executor(None, start_llm_server, True)
+        if not external_server:
+            proc = await loop.run_in_executor(None, start_llm_server, True)
+        else:
+            logger.info("외부 llama-server 감지 - 재사용")
         messages = _build_vlm_messages(frames, transcript_data, max_shorts)
-        response_text = await loop.run_in_executor(None, _call_vlm_api, messages)
-        highlights = parse_highlights(response_text, total_duration, max_shorts)
-        logger.info(f"VLM 분석 완료: {len(highlights)}개 하이라이트 추출")
-        return highlights
+        text = await loop.run_in_executor(None, _call_vlm_api, messages)
+        return parse_highlights(text, total_duration, max_shorts)
     finally:
         if proc is not None:
             await loop.run_in_executor(None, stop_llm_server, proc)
@@ -84,27 +106,13 @@ async def run_vlm_analysis(
 # --------------------------------------------------------------
 
 def _build_vlm_messages(frames: list[dict], transcript_data: dict, max_shorts: int) -> list[dict]:
-    """
-    VLM API용 OpenAI 호환 멀티모달 메시지 생성
-    이미지는 data URI base64로, 텍스트는 content 배열로 전달
-    구조: [system: JSON 지시, user: [image1, image2, ..., text_prompt]]
-    """
+    """VLM API용 OpenAI 호환 멀티모달 메시지 생성 (data URI base64)"""
 
-    system_msg = {
-        "role": "system",
-        "content": (
-            "당신은 유튜브 쇼츠 편집 전문가입니다. "
-            "영상 프레임과 전사 텍스트를 분석하여 "
-            "가장 매력적인 쇼츠 구간을 선별합니다. "
-            "반드시 JSON 형식으로만 응답하세요. "
-        ),
-    }
+    system_msg = {"role": "system", "content": "유튜브 쇼츠 편집 전문가. 영상 프레임 + 전사 분석하여 매력적인 쇼츠 구간을 선별. 반드시 JSON 형식으로만 응답."}
 
-    # user 메시지: 이미지 + 텍스트를 content 배열로 구성
     content_parts = []
 
-    # 이미지 파트 - 각 프레임을 data URI로 전달
-    for frame in frames:
+    for frame in frames[:5]:            # 최대 5장 (페이로드 크기 제한)
         content_parts.append({
             "type": "image_url",
             "image_url": {
@@ -112,7 +120,6 @@ def _build_vlm_messages(frames: list[dict], transcript_data: dict, max_shorts: i
             },
         })
 
-    # 텍스트 파트 - 프레임 타임스탬프 + 전사 텍스트 + 지시사항
     text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
     content_parts.append({"type": "text", "text": text_prompt})
 
@@ -121,27 +128,20 @@ def _build_vlm_messages(frames: list[dict], transcript_data: dict, max_shorts: i
     return [system_msg, user_msg]
 
 def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts: int) -> str:
-    """
-    VLM 텍스트 프롬프트 생성 - 프레임 설명 + 전사 텍스트 + 지시사항
-
-    기존 build_highlight_prompt()와 유사하나,
-    프레임 타임스탬프 매핑 정보가 추가되어 VLM이 시각과 텍스트를 연결 가능
-    """
+    """VLM 텍스트 프롬프트 생성 (프레임 타임스탬프 + 전사 + 지시사항)"""
 
     parts = []
 
-    # 프레임 타임스탬프 매핑 (VLM이 이미지와 시간을 연결할 수 있도록)
     if frames:
         parts.append("## 영상 프레임 타임스탬프")
         for i, f in enumerate(frames):
             parts.append(f"프레임 {i + 1}: {f['timestamp_sec']}초 시점")
         parts.append("")
 
-    # 전사 텍스트 (타임스탬프 포함)
     segments = transcript_data.get("segments", [])
     if segments:
         parts.append("## 전사 텍스트 (타임스탬프 포함)")
-        for seg in segments:
+        for seg in segments[:30]:
             text = seg.get("text", "").strip()
             if text:
                 start = seg.get("start", 0)
@@ -154,39 +154,20 @@ def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts
 
     # 지시사항
     total_dur = transcript_data.get("duration_sec", 0)
-    parts.append(f"## 분석 지시사항")
     parts.append(f"영상 총 길이: {total_dur:.1f}초")
     parts.append(f"최대 쇼츠 수: {max_shorts}개")
     parts.append(f"쇼츠 길이 범위: {MIN_DURATION_SEC}~{MAX_DURATION_SEC}")
     parts.append("")
     parts.append(
-        "위 영상 프레임과 전사 텍스트를 종합 분석하여 "
-        "가장 매력적인 쇼츠 구간을 선별하세요.\n"
-        "시각적으로 흥미로운 장면(표정 변화, 액션, 시각효과)과 "
-        "언어적으로 임팩트 있는 구간(핵심 발언, 반전, 유머)을 "
-        "모두 고려하세요.\n"
-        "각 구간의 최적 길이를 콘텐츠에 맞게 자동 판단하세요:\n"
-        "   - 10~15초: 임팩트 한 장면 (리액션, 반전)\n"
-        "   - 15~30초: 핵심 요약 (인사이트, 팁)\n"
-        "   - 30~60초: 스토리텔링 (맥락 필요)\n"
-        "   - 60~120초: 심층 콘텐츠 (강의, 설명)\n"
+        "영상 프레임 + 전사 종합 분석하여 매력적인 쇼츠 구간을 선별하세요.\n"
+        "구간 길이: 10~15초(임팩트) | 15~30초(핵심) | 30~60초(스토리텔링) | 60~120초(심층)\n"
     )
     parts.append("")
     parts.append(
-        '반드시 아래 JSON 형식으로만 응답:\n'
-        '{"highlights": [\n'
-        '   {"start_sec": 0.0, "end_sec": 30.0, "hook_score": 0.95,\n'
-        '    "reason": "선정 이유", "title_suggestion": "제목",\n'
-        '    "tags": ["태그1", "태그2"],\n'
-        '    "recommended_aspect_ratio": "9:16"}\n'
-        "]}\n\n"
-        "종횡비 선택 기준:\n"
-        "- 9:16: 인물 중심, 세로형 쇼츠/릴스/틱톡\n"
-        "- 16:9: 풍경, 게임플레이, 시네마틱, 다수 인물\n"
-        "- 1:1: 인스타그램 피드, 대칭 구도\n"
-        "- 4:5: 인스타그램 세로, 인물+배경 균형\n"
-        "- 4:3: 클래식, 레트로, 프레젠테이션\n"
-        "- 16:10: 와이드 게임플레이, 울트라 와이드\n"
+        'JSON 형식으로만 응답: {"highlights": [{"start_sec": N, "end_sec": N, "hook_score": N, '
+        '"reason": "선정 이유", "title_suggestion": "제목", "tags": ["태그"], '
+        '"recommended_aspect_ratio": "비율"}]}\n'
+        "종횡비:9:16(인물/세로형 쇼츠) | 16:9(풍경/게임) | 1:1(인스타) | 4:5(인스타 세로) | 4:3(클래식)\n"
     )
 
     return "\n".join(parts)
@@ -196,10 +177,7 @@ def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts
 # --------------------------------------------------------------
 
 def _call_vlm_api(messages: list[dict]) -> str:
-    """
-    llama-server의 OpenAI 호환 API(/v1/chat/completions)로 VLM 추론 요청
-    동기 함수 - run_in_executor로 호출, 타임아웃 120초 (이미지 다수 시 추론 시간 증가)
-    """
+    """llama-server /v1/chat/completions 호출"""
 
     url = f"http://{settings.LLM_SERVER_HOST}:{settings.LLM_SERVER_PORT}/v1/chat/completions"
 
@@ -220,7 +198,6 @@ def _call_vlm_api(messages: list[dict]) -> str:
             method="POST"
         )
 
-        # 타임 아웃 120초: 이미지 다수 포함 시 추론 시간 증가
         resp = urlopen(req, timeout=120)
         body = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
@@ -239,55 +216,74 @@ def _call_vlm_api(messages: list[dict]) -> str:
 # LoRA 추론 - Unsloth/Transformers 직접 (22일차, Qwen2.5-VL-7B)
 # --------------------------------------------------------------
 
-def _run_lora_inference(
-    frames: list[dict], transcript_data: dict,
-    max_shorts: int, adapter_path: str,
-) -> str:
-    """Unsloth FastVisionModel + LoRA 어댑터로 멀티모달 추론 (동기, run_in_executor로 호출)"""
+def _load_lora_model(adapter_path: str):
+    """LoRA 모델 + processor 로드 (공통)"""
 
     from unsloth import FastVisionModel
-    from PIL import Image
-    import base64
-    import io
-
-    logger.info("LoRA 모델 로드 시작 (Qwen2.5-VL-7B)...")
-    model, tokenizer = FastVisionModel.from_pretrained(
-        model_name=adapter_path,
-        load_in_4bit=True,
-        max_seq_length=2048,
-    )
-    FastVisionModel.for_inference(model)
-
-    # 이미지 로드 (base64 -> PIL, 최대 3장)
-    images = []
-    for frame in frames[:3]:
-        img_bytes = base64.b64decode(frame["base64"])
-        images.append(Image.open(io.BytesIO(img_bytes)))
-
-    # 프롬프트 생성 (기존 _build_vlm_text_prompt 재사용)
-    text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
-
-    # Qwen2.5-VL 메시지 구성
-    content = [{"type": "image"} for _ in images]
-    content.append({"type": "text", "text": text_prompt})
-    messages = [{"role": "user", "content": content}]
-
-    # 토크나이즈 + 이미지 처리
     from transformers import AutoProcessor
+    model, tokenizer = FastVisionModel.from_pretrained(model_name=adapter_path, load_in_4bit=True, max_seq_length=2048)
+    FastVisionModel.for_inference(model)
     processor = AutoProcessor.from_pretrained(adapter_path)
-    inputs = processor.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True,
-        return_tensors="pt", return_dict=True,
-    ).to(model.device)
+    return model, tokenizer, processor
 
-    output_ids = model.generate(**inputs, max_new_tokens=2000, temperature=0.3)
-    result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+def _unload_lora_model(model, tokenizer, processor):
+    """LoRA 모델 VRAM 해제"""
 
-    # 모델 해제
     del model, tokenizer, processor
     import gc, torch
     gc.collect()
     torch.cuda.empty_cache()
-    logger.info("LoRA 추론 완료, VRAM 해제")
 
+def _frames_to_pil(frames: list[dict], max_count: int = 3) -> list:
+    """base64 프레임 -> PIL 이미지 변환"""
+
+    from PIL import Image
+    import base64, io
+    return [Image.open(io.BytesIO(base64.b64decode(f["base64"]))) for f in frames[:max_count]]
+
+def _lora_generate(model, tokenizer, processor, messages, max_tokens=2000, temp=0.3) -> str:
+    """LoRA 모델로 생성 후 입력 토큰 제거하여 반환"""
+
+    inputs = processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
+    input_len = inputs["input_ids"].shape[1]
+    out = model.generate(**inputs, max_new_tokens=max_tokens, temperature=temp)
+    return tokenizer.decode(out[0][input_len:], skip_special_tokens=True)
+
+def _verify_highlights(frames: list[dict], candidates: list[dict], adapter_path: str) -> list[dict]:
+    """판별기 LoRA로 각 후보의 적합성 검증 - scripts/verify_highlights.py 서브프로세스로 실행 (VRAM 분리)"""
+
+    import subprocess, sys, json as _json, tempfile, os
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        _json.dump({"frames": frames, "candidates": candidates, "adapter_path": adapter_path}, f)
+        tmp_path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "scripts.verify_highlights", tmp_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        os.unlink(tmp_path)
+        if result.returncode == 0:
+            for line in reversed(result.stdout.strip().splitlines()):
+                try:
+                    verified = _json.loads(line)
+                    logger.info(f"판별기: {len(verified)}/{len(candidates)}개 통과")
+                    return verified
+                except Exception:
+                    continue
+        logger.warning(f"판별기 서브프로세스 실패: {result.stderr[-200:]}")
+        return candidates
+    except Exception as e:
+        logger.warning(f"판별기 실행 오류: {e}")
+        return candidates
+
+def _run_lora_inference(frames: list[dict], transcript_data: dict, max_shorts: int, adapter_path: str) -> str:
+    """Unsloth LoRA 직접 추론 (동기, run_in_executor로 호출)"""
+
+    model, tokenizer, processor = _load_lora_model(adapter_path)
+    images = _frames_to_pil(frames)
+    text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
+    content = [{"type": "image"} for _ in images] + [{"type": "text", "text": text_prompt}]
+    result = _lora_generate(model, tokenizer, processor, [{"role": "user", "content": content}], temp=0.1)
+    _unload_lora_model(model, tokenizer, processor)
+    logger.info("LoRA 생성 완료")
     return result
