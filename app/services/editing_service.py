@@ -294,7 +294,7 @@ class EditingService:
     def _sanitize_filename(name: str) -> str:
         """파일명에 사용할 수 없는 문자를 제거하고 길이 제한"""
 
-        safe = re.sub(r'[\\/*?:"<>|]', '', name)
-        safe = safe.replace('\n', ' ').replace('\r', '').strip()
-        safe = re.sub(r'\s+', '_', safe)
-        return safe[:80] or "untitled"
+        if not any('\uAC00' <= c <= '\uD7A3' for c in (name or "")):
+            return "하이라이트"
+        safe = re.sub(r'[\\/*?:"<>|]', '', name).replace('\n', ' ').replace('\r', '').strip()
+        return re.sub(r'\s+', '_', safe)[:80] or "하이라이트"

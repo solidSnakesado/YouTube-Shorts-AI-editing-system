@@ -76,6 +76,11 @@
         <input id="maxShorts" type="number" value="3" min="1" max="10" style="text-align:center" />
       </div>
       <div style="width:110px">
+        <label>길이(초)</label>
+        <input id="targetDuration" type="number" placeholder="자동" min="10" max="60"
+          style="text-align:center" title="10~60초 입력 시 해당 길이로 생성, 비워두면 AI 자동 결정" />
+      </div>
+      <div style="width:110px">
         <label>종횡비</label>
         <select id="aspectRatio" style="width:100%;padding:10px 8px;font-size:13px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-family:inherit">
           <option value="9:16">9:16 쇼츠</option>
@@ -311,7 +316,10 @@ async function runStep(id) {
   } else if (id <= 4) {
     if (!state.projectId) { showError("먼저 프로젝트를 생성하세요"); return; }
     addLog(`[Step ${id}] ${STEPS[id-1].label} 실행 중...`);
-    const suffix = id === 4 ? `?max_shorts=${document.getElementById("maxShorts").value}` : "";
+    const td = document.getElementById("targetDuration").value.trim();
+    const tdParam = (id === 4 && td) ? `&target_duration_sec=${td}` : "";
+    const suffix = id === 4 ? `?max_shorts=${document.getElementById("maxShorts").value}${tdParam}` : "";
+    if (id === 4 && td) addLog(`  쇼츠 길이: ${td}초 (사용자 지정)`, "info");
     const d = await apiCall(`${API}/projects/${state.projectId}/${STEPS[id-1].ep}${suffix}`, { method:"POST" });
     if (d) {
       if (id === 4 && d.items) { state.shorts = d.items; state.activeIdx = 0; addLog(`쇼츠 ${d.total}개 생성됨`, "success"); d.items.forEach((s,i) => { addLog(`  #${i+1} ${s.start_sec?.toFixed(1)}-${s.end_sec?.toFixed(1)}s | score: ${s.hook_score} | 비율: ${s.aspect_ratio || "9:16"}`); if (s.highlight_reason) addLog(`     이유: ${s.highlight_reason}`, "info"); if (s.title_suggestion) addLog(`     제목: ${s.title_suggestion}`, "info"); }); renderShorts();

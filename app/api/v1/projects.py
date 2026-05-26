@@ -17,6 +17,7 @@
 HTTP 요청/응답만 담당하며, 비즈니스 로직은 서비스 계층으로 위임한다.
 """
 
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 # DI 체인에서 서비스 인스턴스를 가져오는 팩토리 함수
@@ -168,28 +169,24 @@ async def transcribe_video(
 @router.post("/{project_id}/analyze", response_model=ShortsListResponse)
 async def analyze_video(
     project_id: str,
-    max_shorts: int = 5,    # 쿼리 파라미터: ?max_shorts=3
+    max_shorts: int = 5,                        # 쿼리 파라미터: ?max_shorts=5
+    target_duration_sec: Optional[int] = None,  # 쿼리 파라미터: ?target_duration_sec=30 (10~60초, 미입력 시 LLM 자동)
     analysis_svc: AnalysisService = Depends(get_analysis_service),
     video_svc: VideoService = Depends(get_video_service),
 ):
     """
     하이라이트 구간 추출 (LLM 기반) - 6~7일차 구현 / 13일차: LLM 자동 길이 판단
+    24일차: target_duration_sec 파라미터 추가 (사용자 지정 쇼츠 길이)
 
-    POST /api/v1/projects/{id}/analyze?max_shorts=5
+    POST /api/v1/projects/{id}/analyze?max_shorts=5&target_duration_sec=30
 
-    파이프라인에서의 위치: download -> transcribe -> **analyze** 
-    쇼츠 길이는 LLM이 콘텐츠에 맞게 10~120초 범위에서 자동 결정
-
-    전제 조건:
-        - 전사가 완료되어 project.transcript_json이 존재해야 함
-        - project.status가 ANALYZING 상태
-    
-    응답:
-        - 성공: ShortListResponse (생성된 쇼츠 목록 + total)
-        - 실패: 404 (프로젝트 미존재) 또는 500 (추출 실패)
-
-    이전 상태: 501 Not Implemented (스텁)
+    target_duration_sec: 10~60 사이 정수 입력 시 해당 길이 기준으로 쇼츠 생성
+                         미 입력 시 LLM이 콘텐츠에 맞게 10~120초 범위에서 자동 결정
     """
+
+    # target_duration_sec 범위 검증 (입력된 경우에만 처리)
+    if target_duration_sec is not None and not (10 <= target_duration_sec <= 60):
+        raise HTTPException(status_code=400, detail="target_duration_sec는 10~60 사이 정수여야 합니다.")
 
     # 프로젝트 존재 확인
     project = await video_svc.get_project(project_id)
@@ -197,7 +194,7 @@ async def analyze_video(
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
     
     # 하이라이트 추출 실행 (서비스 계층에 위임)
-    shorts = await analysis_svc.extract_highlights(project_id, max_shorts)
+    shorts = await analysis_svc.extract_highlights(project_id, max_shorts, target_duration_sec)
     if not shorts:
         raise HTTPException(status_code=500, detail="하이라이트 추출에 실패했습니다.")
     

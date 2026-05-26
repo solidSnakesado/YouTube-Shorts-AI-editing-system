@@ -43,19 +43,19 @@ def _is_server_running() -> bool:
     except (URLError, OSError):
         return False
 
-async def run_vlm_analysis(
-        source_path: str, transcript_data: dict, 
-        max_shorts: int = 5, lora_adapter_path: Optional[str] = None,
-) -> list[dict]:
+async def run_vlm_analysis(source_path: str, transcript_data: dict, max_shorts: int = 5, lora_adapter_path: Optional[str] = None) -> list[dict]:
     """VLM 멀티모달 분석 파이프라인 실행
     LORA_ENABLED=true: 생성기 LoRA -> 판별기 LoRA 순차 실행
     lora_adapter_path 직접 지정: 해당 어댑터 단독 실행 (evaluate_lora 등)
     기본: llama-server 서브프로세스"""
 
-    frames = await extract_frames(Path(source_path))
+    total_duration = transcript_data.get("duration_sec", 0)
+    target_dur = int(transcript_data.get("target_duration_sec") or 0)
+    ## 24일차: 영상 전체 군도으커버 (200초 이하는 기본 10초 간격)
+    dyn_interval = max(10.0, total_duration / 20) if total_duration > 200 else None
+    frames = await extract_frames(Path(source_path), interval_sec=dyn_interval)
     if not frames:
         logger.warning("프레임 추출 결과 없음 - 텍스트 전용 프롬프트로 폴백")
-    total_duration = transcript_data.get("duration_sec", 0)
     loop = asyncio.get_event_loop()
 
     # 직접 어댑터 지정 (evaluate_lora.py 등 외부 호출)
@@ -63,7 +63,7 @@ async def run_vlm_analysis(
         logger.info(f"LoRA 단독 추론: {lora_adapter_path}")
         text = await loop.run_in_executor(
             None, _run_lora_inference, frames, transcript_data, max_shorts, lora_adapter_path)
-        return parse_highlights(text, total_duration, max_shorts)
+        return parse_highlights(text, total_duration, max_shorts, target_duration_sec=target_dur)
     
     # LoRA 파이프라인: 생성기 -> 판별기 순차 실행
     gen_path = settings.lora_generator_path
@@ -72,7 +72,7 @@ async def run_vlm_analysis(
         logger.info("LoRA 파이프라인: 생성기 -> 판별기")
         gen_text = await loop.run_in_executor(
             None, _run_lora_inference, frames, transcript_data, max_shorts, str(gen_path))
-        candidates = parse_highlights(gen_text, total_duration, max_shorts)
+        candidates = parse_highlights(gen_text, total_duration, max_shorts, target_duration_sec=target_dur)
         logger.info(f"생성기 결과: {len(candidates)}개 후보")
         if not candidates:
             return []
@@ -96,7 +96,7 @@ async def run_vlm_analysis(
             logger.info("외부 llama-server 감지 - 재사용")
         messages = _build_vlm_messages(frames, transcript_data, max_shorts)
         text = await loop.run_in_executor(None, _call_vlm_api, messages)
-        return parse_highlights(text, total_duration, max_shorts)
+        return parse_highlights(text, total_duration, max_shorts, target_duration_sec=target_dur)
     finally:
         if proc is not None:
             await loop.run_in_executor(None, stop_llm_server, proc)
@@ -109,9 +109,7 @@ def _build_vlm_messages(frames: list[dict], transcript_data: dict, max_shorts: i
     """VLM API용 OpenAI 호환 멀티모달 메시지 생성 (data URI base64)"""
 
     system_msg = {"role": "system", "content": "유튜브 쇼츠 편집 전문가. 영상 프레임 + 전사 분석하여 매력적인 쇼츠 구간을 선별. 반드시 JSON 형식으로만 응답."}
-
     content_parts = []
-
     for frame in frames[:5]:            # 최대 5장 (페이로드 크기 제한)
         content_parts.append({
             "type": "image_url",
@@ -122,7 +120,6 @@ def _build_vlm_messages(frames: list[dict], transcript_data: dict, max_shorts: i
 
     text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
     content_parts.append({"type": "text", "text": text_prompt})
-
     user_msg = {"role": "user", "content": content_parts}
 
     return [system_msg, user_msg]
@@ -131,6 +128,11 @@ def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts
     """VLM 텍스트 프롬프트 생성 (프레임 타임스탬프 + 전사 + 지시사항)"""
 
     parts = []
+
+    # 영상 원본 제목 - 클릭 유발 제목 생성의 맥락으로 활용
+    video_title = transcript_data.get("video_title", "")
+    if video_title:
+        parts.append(f"## 영상 원본 제목\n{video_title}\n")
 
     if frames:
         parts.append("## 영상 프레임 타임스탬프")
@@ -158,18 +160,26 @@ def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts
     parts.append(f"최대 쇼츠 수: {max_shorts}개")
     parts.append(f"쇼츠 길이 범위: {MIN_DURATION_SEC}~{MAX_DURATION_SEC}")
     parts.append("")
+    target_dur = transcript_data.get("target_duration_sec")
+    length_guide = (f"구간 길이: {target_dur}초에 인접하게 조정하세요. (사용자 지정)" if target_dur
+                    else "구간 길이: 최소 30초 이상 권장. 30~60초(핵심) | 60~120초(심층 스토리). 10초 미만 금지")
+    parts.append(f"영상 프레임 + 전사 종합 분석하여 매력적인 쇼츠 구간을 선별하세요.\n{length_guide}")
+    parts.append("")
     parts.append(
-        "영상 프레임 + 전사 종합 분석하여 매력적인 쇼츠 구간을 선별하세요.\n"
-        "구간 길이: 10~15초(임팩트) | 15~30초(핵심) | 30~60초(스토리텔링) | 60~120초(심층)\n"
+        "title_suggestion 작성 규칙 (필수):\n"
+        "- 반드시 한국어로 작성\n"
+        "- 15자 이내의 짧고 강렬한 문구\n"
+        "- 클릭을 유발하는 표현 사용 (예: '이거 실화?', '충격 반전', '역대급 순간', '못 믿겠지만...')\n"
+        "- 영상 원본 제목의 맥락을 반영하되 그대로 복사하지 말 것\n"
+        "- 숫자/이모지 활용 가능 (예: '3번 죽을 뻔한 순간')\n"
     )
     parts.append("")
     parts.append(
         'JSON 형식으로만 응답: {"highlights": [{"start_sec": N, "end_sec": N, "hook_score": N, '
-        '"reason": "선정 이유", "title_suggestion": "제목", "tags": ["태그"], '
+        '"reason": "선정 이유", "title_suggestion": "클릭 유발 한글 제목", "tags": ["태그"], '
         '"recommended_aspect_ratio": "비율"}]}\n'
         "종횡비:9:16(인물/세로형 쇼츠) | 16:9(풍경/게임) | 1:1(인스타) | 4:5(인스타 세로) | 4:3(클래식)\n"
     )
-
     return "\n".join(parts)
     
 # --------------------------------------------------------------
@@ -221,7 +231,7 @@ def _load_lora_model(adapter_path: str):
 
     from unsloth import FastVisionModel
     from transformers import AutoProcessor
-    model, tokenizer = FastVisionModel.from_pretrained(model_name=adapter_path, load_in_4bit=True, max_seq_length=2048)
+    model, tokenizer = FastVisionModel.from_pretrained(model_name=adapter_path, load_in_4bit=True, max_seq_length=4096)
     FastVisionModel.for_inference(model)
     processor = AutoProcessor.from_pretrained(adapter_path)
     return model, tokenizer, processor
@@ -241,12 +251,12 @@ def _frames_to_pil(frames: list[dict], max_count: int = 3) -> list:
     import base64, io
     return [Image.open(io.BytesIO(base64.b64decode(f["base64"]))) for f in frames[:max_count]]
 
-def _lora_generate(model, tokenizer, processor, messages, max_tokens=2000, temp=0.3) -> str:
+def _lora_generate(model, tokenizer, processor, messages, max_tokens=1024, temp=0.3) -> str:
     """LoRA 모델로 생성 후 입력 토큰 제거하여 반환"""
 
     inputs = processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
     input_len = inputs["input_ids"].shape[1]
-    out = model.generate(**inputs, max_new_tokens=max_tokens, temperature=temp)
+    out = model.generate(**inputs, max_new_tokens=max_tokens, temperature=temp, do_sample=(temp > 0))
     return tokenizer.decode(out[0][input_len:], skip_special_tokens=True)
 
 def _verify_highlights(frames: list[dict], candidates: list[dict], adapter_path: str) -> list[dict]:
@@ -283,7 +293,7 @@ def _run_lora_inference(frames: list[dict], transcript_data: dict, max_shorts: i
     images = _frames_to_pil(frames)
     text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
     content = [{"type": "image"} for _ in images] + [{"type": "text", "text": text_prompt}]
-    result = _lora_generate(model, tokenizer, processor, [{"role": "user", "content": content}], temp=0.1)
+    result = _lora_generate(model, tokenizer, processor, [{"role": "user", "content": content}], temp=0.4)
     _unload_lora_model(model, tokenizer, processor)
     logger.info("LoRA 생성 완료")
     return result

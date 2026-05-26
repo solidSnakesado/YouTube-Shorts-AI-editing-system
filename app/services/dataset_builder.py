@@ -2,10 +2,9 @@
 # 역할: 히트맵 JSONL -> 피크/비피크 구간 프레임 추출 -> VLM 파인튜닝 데이터셋 생성
 # 의존: config.py, frame_extractor.py, yt-dlp (외부 CLI)
 # 21일차 신규: 영상 1개씩 다운로드 -> 프레임 추출 -> 삭제 (저장 공간을 효율적으로 사용하기 위함)
+# 24일차 수정: generator 모드에서 다수 하이라이트를 하나의 샘플로 묶음
 
-"""
-파인튜닝 데이터셋 빌더 - 히트맵 피크 기반 VLM 학습 데이터 생성
-"""
+"""파인튜닝 데이터셋 빌더 - 히트맵 피크 기반 VLM 학습 데이터 생성"""
 
 import asyncio
 import json
@@ -22,34 +21,22 @@ class DatasetBuilder:
     """히트맵 피크 기반 VLM 파인튜닝 데이터셋 빌더"""
 
     def __init__(
-        self,
-        heatmap_path: Path,
-        output_dir: Optional[Path] = None,
-        min_peak_count: Optional[int] = None,
-        frames_per_segment: Optional[int] = None,
-        negative_ratio: Optional[float] = None,
-        mode: str = "classifier",
+        self, heatmap_path: Path, output_dir: Optional[Path] = None,
+        min_peak_count: Optional[int] = None, frames_per_segment: Optional[int] = None,
+        negative_ratio: Optional[float] = None, mode: str = "classifier",
     ):
         self.heatmap_path = Path(heatmap_path)
-        self.mode = mode    # "classifier" (판별기: 하이라이트/일반) 또는 "generator" (생성기: JSON)
+        self.mode = mode    # "classifier" (판별기) 또는 "generator" (생성기: 다수 JSON)
         self.output_dir = output_dir or settings.finetune_output_path
         self.frames_dir = self.output_dir / "frames"
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         self.min_peak_count = min_peak_count or settings.FINETUNE_MIN_PEAK_COUNT
         self.frames_per_segment = frames_per_segment or settings.FINETUNE_FRAMES_PER_SEGMENT
-        self.negative_ratio = (
-            negative_ratio if negative_ratio is not None
-            else settings.FINETUNE_NEGATIVE_RATIO
-        )
+        self.negative_ratio = negative_ratio if negative_ratio is not None else settings.FINETUNE_NEGATIVE_RATIO
         self._stats = {
-            "total_videos": 0, "filtered_videos": 0,
-            "processed": 0, "skipped": 0,
-            "positive_samples": 0, "negative_samples": 0,
+            "total_videos": 0, "filtered_videos": 0, "processed": 0, 
+            "skipped": 0, "positive_samples": 0, "negative_samples": 0,
         }
-
-    # --------------------------------------------------------------
-    # 공개 API
-    # --------------------------------------------------------------
 
     async def build(self, output_filename: str = "dataset.jsonl") -> Path:
         """전체 파이프라인: JSONL 로드 -> 영상 선별 -> 프레임 추출 -> 데이터셋 저장"""
@@ -59,12 +46,7 @@ class DatasetBuilder:
         videos = [r for r in all_records if len(r.get("peak_segments", [])) >= self.min_peak_count]
         self._stats["total_videos"] = len(all_records)
         self._stats["filtered_videos"] = len(videos)
-
-        logger.info(
-            f"데이터셋 빌드 시작 | 전체: {len(all_records)}개 -> "
-            f"선별: {len(videos)}개 (피크 {self.min_peak_count}개 이상)"
-        )
-
+        logger.info(f"데이터셋 빌드 시작 | 전체: {len(all_records)}개 -> 선별: {len(videos)}개 (피크 {self.min_peak_count}개 이상)")
         for idx, video in enumerate(videos, 1):
             vid = video["video_id"]
             logger.info(f"[{idx}/{len(videos)}] 처리 중: {vid}")
@@ -78,21 +60,14 @@ class DatasetBuilder:
                 self._stats["skipped"] += 1
 
         logger.info(
-            f"데이터셋 빌드 완료 | 처리: {self._stats['processed']}개, "
-            f"스킵: {self._stats['skipped']}개 | "
-            f"포지티브: {self._stats['positive_samples']}개, "
-            f"네거티브: {self._stats['negative_samples']}개"
+            f"데이터셋 빌드 완료 | 처리: {self._stats['processed']}개, 스킵: {self._stats['skipped']}개 | "
+            f"포지티브: {self._stats['positive_samples']}개, 네거티브: {self._stats['negative_samples']}개"
         )
-
         return output_path
 
     @property
     def stats(self) -> dict:
         return dict(self._stats)
-    
-    # --------------------------------------------------------------
-    # JSONL 로드
-    # --------------------------------------------------------------
 
     def _load_all(self) -> list[dict]:
         if not self.heatmap_path.is_file():
@@ -113,7 +88,6 @@ class DatasetBuilder:
     # --------------------------------------------------------------
     # 영상 단위 처리
     # --------------------------------------------------------------
-
     async def _process_video(self, video: dict) -> list[dict]:
         """다운로드 -> 피크/비피크 프레임 추출 -> 영상 삭제 -> 샘플 리스트 반환"""
 
@@ -130,39 +104,74 @@ class DatasetBuilder:
             await self._download_video(vid, video_path)
             if not video_path.is_file():
                 raise RuntimeError(f"다운로드 실패: {vid}")
-            samples = []
-
-            # 포지티브: 피크 구간
-            for peak in peaks:
-                frames = await self._extract_segment_frames(
-                    video_path, vid, peak["start_sec"], peak["end_sec"]
-                )
-                if not frames:
-                    continue
-                samples.append(self._build_sample(
-                    vid, title, duration,
-                    peak["start_sec"], peak["end_sec"], frames, "하이라이트", self.mode
-                ))
-                self._stats["positive_samples"] += 1
-            
-            # 네거티브: 비피크 구간 랜덤 선택
-            neg_count = int(len(peaks) * self.negative_ratio)
-            for seg_start, seg_end in self._pick_negative_segments(peaks, duration, neg_count):
-                frames = await self._extract_segment_frames(
-                    video_path, vid, seg_start, seg_end
-                )
-                if not frames:
-                    continue
-                samples.append(self._build_sample(
-                    vid, title, duration, seg_start, seg_end, frames, "일반", self.mode
-                ))
-                self._stats["negative_samples"] += 1
-
-            return samples
+            if self.mode == "generator":
+                return await self._process_generator(video_path, vid, title, duration, peaks)
+            return await self._process_classifier(video_path, vid, title, duration, peaks)
         finally:
             if video_path.is_file():
                 video_path.unlink()
                 logger.debug(f"임시 영상 삭제: {video_path}")
+
+    async def _process_classifier(self, video_path: Path, vid: str, title:str, duration: float, peaks: list[dict]) -> list[dict]:
+        """판별기 모드: 피크별 개별 샘플 생성"""
+
+        samples = []
+        for peak in peaks:
+            frames = await self._extract_segment_frames(video_path, vid, peak["start_sec"], peak["end_sec"])
+            if not frames:
+                continue
+            meta = self._seg_metadata(vid, title, duration, peak["start_sec"], peak["end_sec"])
+            samples.append({
+                "instruction": "이 게임 영상 프레임을 보고 시청자가 많이 다시 본 하이라이트 구간인지 판단하세요.",
+                "images": frames, "metadata": meta, "output": "하이라이트"
+            })
+            self._stats["positive_samples"] += 1
+        neg_count = int(len(peaks) * self.negative_ratio)
+        for seg_s, seg_e in self._pick_negative_segments(peaks, duration, neg_count):
+            frames = await self._extract_segment_frames(video_path, vid, seg_s, seg_e)
+            if not frames:
+                continue
+            meta = self._seg_metadata(vid, title, duration, seg_s, seg_e)
+            samples.append({
+                "instruction": "이 게임 영상 프레임을 보고 시청자가 많이 다시 본 하이라이트 구간인지 판단하세요.",
+                "images": frames, "metadata": meta, "output": "일반"
+            })
+            self._stats["negative_samples"] += 1
+        return samples
+    
+    async def _process_generator(self, video_path: Path, vid: str, title:str, duration: float, peaks: list[dict]) -> list[dict]:
+        """생성기 모드: 영상 전체 피크를 하나의 다수 하이라이트 샘플로 묶음"""
+
+        norm_peaks = self._normalize_peaks(peaks)
+        if not norm_peaks:
+            return []
+        all_frames: list[str] = []
+        valid_peaks: list[dict] = []
+        for peak in norm_peaks:
+            frames = await self._extract_segment_frames(video_path, vid, peak["start_sec"], peak["end_sec"])
+            if not frames:
+                continue
+            all_frames.extend(frames)
+            valid_peaks.append(peak)
+        if not valid_peaks:
+            return []
+        highlights = []
+        for i, p in enumerate(valid_peaks):
+            highlights.append({
+                "start_sec": round(p["start_sec"], 1), "end_sec": round(p["end_sec"], 1),
+                "hook_score": round(0.95 - i * 0.05, 2),
+                "reason": "시청자가 많이 다시 본 구간",
+                "title_suggestion": f"{title[:25]} #{i + 1}" if title else f"하이라이트 #{i + 1}",
+                "tags": ["게임", "하이라이트"], "recommended_aspect_ratio": "16:9",
+            })
+        output = json.dumps({"highlights": highlights}, ensure_ascii=False)
+        instruction = (
+            "영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. "
+            "하이라이트가 없으면 빈 리스트를 반환하세요."
+        )
+        meta = {"video_id": vid, "video_title": title, "duration_sec": duration, "highlight_count": len(highlights)}
+        self._stats["positive_samples"] += len(valid_peaks)
+        return [{"instruction": instruction, "images": all_frames, "metadata": meta, "output": output}]
 
     # --------------------------------------------------------------
     # 프레임 추출
@@ -176,13 +185,9 @@ class DatasetBuilder:
             return []
         interval = seg_duration / max(self.frames_per_segment, 1)
         seg_dir = self.frames_dir / f"{video_id}_{int(start)}"
-
         results = await extract_frames(
-            video_path=video_path,
-            interval_sec=interval,
-            max_frames=self.frames_per_segment,
-            resolution=settings.FRAME_EXTRACT_RESOLUTION,
-            start_sec=start, end_sec=end, save_dir=seg_dir,
+            video_path=video_path, interval_sec=interval, max_frames=self.frames_per_segment,
+            resolution=settings.FRAME_EXTRACT_RESOLUTION, start_sec=start, end_sec=end, save_dir=seg_dir,
         )
         
         frame_paths = []
@@ -193,49 +198,36 @@ class DatasetBuilder:
             except ValueError:
                 rel_path = abs_path
             frame_paths.append(str(rel_path))
-        
         return frame_paths
 
     # --------------------------------------------------------------
-    # 샘플 구성
+    # 헬퍼
     # --------------------------------------------------------------
 
     @staticmethod
-    def _build_sample(
-        video_id: str, title: str, duration: float,
-        seg_start: float, seg_end: float,
-        frame_paths: list[str], label: str,
-        mode: str = "classifier",
-    ) -> dict:
-        metadata = {
-            "video_id": video_id, "video_title": title, "duration_sec": duration,
-            "segment_start": seg_start, "segment_end": seg_end,
-            "position_ratio": round(seg_start / duration, 3) if duration > 0 else 0.0
+    def _seg_metadata(vid: str, title: str, dur: float, start: float, end: float) -> dict:
+        return {
+            "video_id": vid, "video_title": title, "duration_sec": dur,
+            "segment_start": start, "segment_end": end,
+            "position_ratio": round(start / dur, 3) if dur > 0 else 0.0,
         }
-        if mode == "generator":
-            # 생성기: 하이라이트 구간은 전체 JSON, 비피크 구간은 빈 리스트
-            if label == "하이라이트":
-                output = json.dumps({"highlights": [{
-                    "start_sec": seg_start, "end_sec": seg_end,
-                    "hook_score": 0.9, "reason": "시청자가 많이 다시 본 구간",
-                    "title_suggestion": title[:30] if title else "하이라이트",
-                    "tags": ["게임", "하이라이트"],
-                    "recommended_aspect_ratio": "16:9",
-                }]}, ensure_ascii=False)
-            else:
-                output = json.dumps({"highlights": []}, ensure_ascii=False)
-            instruction = (
-                "영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. "
-                "하이라이트가 없으면 빈 리스트를 반환하세요."
-            )
-        else:
-            output = label
-            instruction = "이 게임 영상 프레임들을 보고 시청자가 많이 다시 본 하이라이트 구간인지 판단하세요."
-        return {"instruction": instruction, "images": frame_paths, "metadata": metadata, "output": output}
 
-    # --------------------------------------------------------------
-    # 네거티브 세그먼트 선택
-    # --------------------------------------------------------------
+    @staticmethod
+    def _normalize_peaks(peaks: list[dict]) -> list[dict]:
+        """구간 길이를 15~60초로 정규화"""
+
+        normalized = []
+        for p in peaks:
+            start, end = p["start_sec"], p["end_sec"]
+            dur = end - start
+            if dur < 15.0:
+                end = start + 30.0
+            elif dur > 60.0:
+                end = start + 60.0
+            normalized.append({"start_sec": start, "end_sec": round(end, 1)})
+
+        return normalized
+
     @staticmethod
     def _pick_negative_segments(peaks: list[dict], duration: float, count: int) -> list[tuple[float, float]]:
         """피크와 겹치지 않는 구간에서 네거티브 세그먼트 랜덤 선택"""
@@ -263,9 +255,6 @@ class DatasetBuilder:
         chosen = random.sample(candidates, min(count, len(candidates)))
         return [(s, s + seg_len) for s in chosen]
 
-    # --------------------------------------------------------------
-    # 영상 다운로드
-    # --------------------------------------------------------------
     async def _download_video(self, video_id: str, output_path: Path) -> None:
         """yt-dlp로 최저 화질 다운로드 (프레임 추출용)"""
 

@@ -1,6 +1,6 @@
 """
-2026.5.3
-2026.5.5
+2026.5.4
+2026.5.6
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -34,7 +34,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from unsloth_zoo.temporary_patches.common import torch_compile
 from typing import Any, List, Optional, Tuple, Union, Dict, Set, Callable
-from peft.tuners.lora.variants import (Any, torch)
+from peft.tuners.lora.torchao import (Any, torch)
 
 
 torch_addmm = torch.addmm

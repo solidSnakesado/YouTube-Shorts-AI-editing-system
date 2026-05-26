@@ -100,7 +100,7 @@ class AnalysisService:
             self._whisper_model = None
     
     # 공개 메서드: 하이라이트 추출 (6~7/14~15/17일차)
-    async def extract_highlights(self, project_id: str, max_shorts: int = 5) -> list[Shorts]:
+    async def extract_highlights(self, project_id: str, max_shorts: int = 5, target_duration_sec: Optional[int] = None) -> list[Shorts]:
         """
         하이라이트 추출: VLM 우선 -> 텍스트 LLM 폴백(17일차: 청크 분할) -> 음성 없으면 시간 분할
         13일차: duration_sec 제거(LLM 자동 판단) / 14~15일차: VLM 분기 / 17일차: 청크 분할
@@ -115,6 +115,13 @@ class AnalysisService:
         if transcript_data is None:
             await self.project_repo.update_status(project_id, ProjectStatus.FAILED, "전사 데이터가 없습니다. 먼저 전사를 실행하세요.")
             return []
+
+        # 영상 제목을 transcript_data에 주입 -> 프롬프트에서 클립 유발 한글 제목 생성에 활용
+        if project.title:
+            transcript_data["video_title"] = project.title
+        # 사용자 지정 쇼츠 길이 주입 (24일차: ?target_duration_sec=30 파라미터)
+        if target_duration_sec is not None:
+            transcript_data["target_duration_sec"] = target_duration_sec
 
         logger.info(f"하이라이트 추출 시작: {project_id}")
 

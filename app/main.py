@@ -17,6 +17,7 @@ YT Shorts AI - 애플리케이션의 집입점
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles     # 24일차: output/ 정적 파일 서빙 (쇼츠 재생용)
 # CORS 미들웨어: 브라우저의 Cross-Origin 요청을 허용
 # 프론트엔드(React 등)가 다른 포트에서 API를 호출할 때 필요
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,6 +82,8 @@ app.add_middleware(
 # prefix="/api/v1": 모든 엔드포인트에서 /api/v1 접두사 부여
 # 결과 URL 예시: /api/v1/projects/, /api/v1/shorts/, /api/v1/system/status
 app.include_router(api_router, prefix="/api/v1")
+# output/ 디렉토리를 /static/outputs 로 서빙 (24일차: 쇼츠 재생 기능)
+app.mount("/static/outputs", StaticFiles(directory=str(settings.output_path)), name="outputs")
 
 # --------------------------------------------------------------
 # 헨스 체크 엔드포인트

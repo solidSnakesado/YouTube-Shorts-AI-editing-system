@@ -191,15 +191,16 @@ def build_crop_timeline(detections: list[dict], strategy: str, aspect_ratio: str
         crop_w = orig_w
         crop_h = int(crop_w * ar_h / ar_w)
 
+    center_x, center_y = orig_w // 2, orig_h // 2       # 중앙 기준 크롭 (레터박스 영상 대응)
     timeline = []
     for d in detections:
         if strategy == STRATEGY_LETTERBOX:
-            cx_pos = (orig_w - crop_w) // 2
-            cy_pos = (orig_h - crop_h) // 2
+            cx_pos = center_x - crop_w // 2
+            cy_pos = center_y - crop_h // 2
             is_lb = True
         else:
-            cx = d.get("smooth_cx", orig_w // 2)
-            cy = d.get("smooth_cy", orig_h // 2)
+            cx = d.get("smooth_cx", center_x)
+            cy = d.get("smooth_cy", center_y)
             cx_pos = max(0, min(cx - crop_w // 2, orig_w - crop_w))
             cy_pos = max(0, min(cy - crop_h // 2, orig_h - crop_h))
             is_lb = False
