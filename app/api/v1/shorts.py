@@ -56,23 +56,23 @@ async def list_shorts(
 @router.post("/{shorts_id}/edit", response_model=ShortResponse)
 async def edit_shorts(
     shorts_id: str,
-    aspect_ratio: str = "9:16",                 # 쿼리 파라미터: ?aspect_ratio=9:16
+    aspect_ratio: str = "9:16",               
+    layout: str = "crop",           # 26일차: "crop"(기본) | "letterbox"(블러 배경)
     editing_svc: EditingService = Depends(get_editing_service)
 ):
     """
-    쇼츠 리프레이밍 실행
+    쇼츠 리프레이밍 실행 / 26일차: layout 파라미터 추가
 
-    POST /api/v1/shorts/{shorts_id}/edit?aspect_ratio=9:16
+    POST /api/v1/shorts/{shorts_id}/edit?aspect_ratio=9:16&layout=crop
 
+    layout=crop(기본): YOLO 피사체 추적 -> 적응형 크롭
+    layout=letterbox: 원본 비율 유지 + 블러 배경 채움
     지원 종횡비: 9:16(쇼츠), 16:9(가로), 1:1(정사각), 4:5, 4:3, 16:10
-    YOLOv8 피사체 추적 -> 스무딩 -> 적응형 크롭 -> FFmpeg 리프레이밍
     """
 
-    result = await editing_svc.reframe_clip(shorts_id, aspect_ratio)
-
+    result = await editing_svc.reframe_clip(shorts_id, aspect_ratio, layout=layout)
     if not result:
         raise HTTPException(status_code=500, detail="리프레이밍에 실패했습니다.")
-    
     return ShortResponse(
         **result.__dict__,
         duration_sec=round(result.end_sec - result.start_sec, 3)
@@ -115,31 +115,25 @@ async def subtitle_shorts(
 @router.post("/{shorts_id}/encode", response_model=ShortResponse)
 async def encode_shorts(
     shorts_id: str,
+    with_title: bool = False,        # 26일차: 제목 오버레이 여부 (기본 False)
     editing_svc: EditingService = Depends(get_editing_service),
 ):
     """
-    최종 인코딩 - 11~12일차 구현
+    최종 인코딩 - 11~12일차 구현 / 26일차: with_title 파라미터 추가
 
     POST /api/v1/shorts/{shorts_id}/encode
 
-    파이프라인에서의 위치: subtitle -> **encode** -> COMPLETED
+    with_title=false(기본 - 미사용): 오버레이 없이 바로 인코딩
+    with_title=true: title_suggestion을 영상 상단에 오버레이 후 인코딩
 
     NVENC H.264 GPU 인코딩 + 오디오 노멀라이즈(-14 LUFS)
     + 피치 보존 속도 조정(1.05x) + movflags +faststart
-    최종 출력: outputs/{shorts_id}.mp4 (1080x1920, H.264, AAC)
-
-    전제 조건:
-        - subtitle 완료되어 output_path에 자막 합성 영상이 존재
-
-    응답:
-        - 성공: ShortResponse (status=completed, output_path=최종 파일)
-        - 실패: 500 (인코딩 실패) 
+    최종 출력: outputs/{title}.mp4 (1080x1920, H.264, AAC)
     """
 
-    result = await editing_svc.encode_final(shorts_id)
+    result = await editing_svc.encode_final(shorts_id, with_title=with_title)
     if not result:
         raise HTTPException(status_code=500, detail="최종 인코딩에 실패했습니다.")
-    
     return ShortResponse(
         **result.__dict__,
         duration_sec=round(result.end_sec - result.start_sec, 3)

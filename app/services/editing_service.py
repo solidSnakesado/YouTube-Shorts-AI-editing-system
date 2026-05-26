@@ -11,7 +11,6 @@
 
 import asyncio
 import json
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -32,11 +31,17 @@ from app.services.reframe_engine import (
     build_crop_timeline, run_ffmpeg_reframe, run_ffmpeg_resize, TARGET_RESOLUTIONS,
 )
 
+# 레터박스 레이아웃 헬퍼 (26일차 신규)
+from app.services.letterbox_engine import run_ffmpeg_letterbox
+
 # 자막/인코딩 헬퍼 (11~12일차 신규 / 17일차: verify_font 추가)
 from app.services.subtitle_generator import (
     extract_words_for_range, build_ass_header, build_ass_events,
     write_ass_file, run_ffmpeg_subtitle, run_ffmpeg_encode, verify_font
 )
+
+# 제목 오버레이 헬퍼 (26일차 신규)
+from app.services.title_overlay import apply_title_overlay
 
 class EditingService:
     """편집 서비스: 리프레이밍 + 자막 합성 + 최종 인코딩 + 리사이징"""
@@ -49,9 +54,11 @@ class EditingService:
     # --------------------------------------------------------------
     # 리프레이밍 (8~9일차 / 11~12일차 클립 추출 추가)
     # --------------------------------------------------------------
-    async def reframe_clip(self, short_id: str, aspect_ratio: str = "9:16") -> Optional[Shorts]:
+    async def reframe_clip(self, short_id: str, aspect_ratio: str = "9:16", layout: str = "crop") -> Optional[Shorts]:
         """
         클립 추출 + 지능형 리프레이밍
+        layout="crop"(기본): YOLO 피사체 추적 크롭
+        layout="letterbox": 블러 배경 레터박스 (26일차 추가)
         흐름: 클립 추출 -> YOLO 탐지 -> 스무딩 -> 전략 -> 크롭 -> FFmpeg 리프레이밍
         21일차: aspect_ratio를 run_ffmpeg_reframe에 전달하여 다양한 비율 지원
         """
@@ -77,36 +84,29 @@ class EditingService:
         # 상태 전환: QUEUED -> REFRAMING
         short = await self.shorts_repo.update(short, {"status": ShortStatus.REFRAMING})
         logger.info(f"리프레이밍 시작: {short_id} | {short.start_sec:.1f}-{short.end_sec:.1f}s")
-
         try:
-            # [핵심 수정] 1단계: 클립 추출 - 전체 소스에서 구간만 잘라냄
             clip_path = self._build_output_path(short, "clip")
             clip_ok = await extract_clip(project.source_path, str(clip_path), short.start_sec, short.end_sec)
             if not clip_ok:
                 await self._fail_short(short, "클립 추출 실패")
                 return None
-
-            # 2단계 클립에서 YOLO 피사체 탐지 (전체 소스 X, 클립 O)
             output_path = self._build_output_path(short, "reframed")
-            detections = await asyncio.get_event_loop().run_in_executor(None, self._run_detection, str(clip_path))
-            
-            # 3단계: 스무딩 -> 전략 + 크롭 타임라인
-            detections = smooth_trajectory(detections)
-            strategy = choose_strategy(detections)
-            timeline = build_crop_timeline(detections, strategy, aspect_ratio)
-            logger.info(f"리프레이밍 전략: {strategy} | 쇼츠: {short_id}")
-
-            # 4단계: FFmpeg 리프레이밍 (클립 입력)
-            success = await run_ffmpeg_reframe(str(clip_path), str(output_path), timeline, aspect_ratio)
+            if layout == "letterbox":
+                logger.info(f"레터박스 레이아웃 적용: {short_id}")
+                success = await run_ffmpeg_letterbox(str(clip_path), str(output_path), aspect_ratio)
+            else:
+                detections = await asyncio.get_event_loop().run_in_executor(None, self._run_detection, str(clip_path))
+                detections = smooth_trajectory(detections)
+                strategy = choose_strategy(detections)
+                timeline = build_crop_timeline(detections, strategy, aspect_ratio)
+                logger.info(f"리프레이밍 전략: {strategy} | 쇼츠: {short_id}")
+                success = await run_ffmpeg_reframe(str(clip_path), str(output_path), timeline, aspect_ratio)
             if not success:
                 await self._fail_short(short, "FFmpeg 리프레이밍 실패")
                 return None
-            
             short = await self.shorts_repo.update(short, {"output_path": str(output_path), "status": ShortStatus.QUEUED})
-
             logger.info(f"리프레이밍 완료: {short_id} -> {output_path}")
             return short
-        
         except Exception as e:
             logger.error(f"리프레이밍 실패 [{short_id}]: {e}")
             await self._fail_short(short, f"리프레이밍 실패: {str(e)}")
@@ -123,11 +123,11 @@ class EditingService:
 
         short = await self.shorts_repo.get_by_id(short_id)
         if not short:
-            return None
+            return None     
         
         if not short.output_path or not Path(short.output_path).exists():
             await self._fail_short(short, "리프레이밍된 영상이 없습니다. 먼저 edit을 실행하세요.")
-            return None
+            return None 
         
         project = await self.project_repo.get_by_id(short.project_id)
         transcript = self._load_transcript(project)
@@ -179,40 +179,40 @@ class EditingService:
     # --------------------------------------------------------------
     # 최종 인코딩 (11~12일차)
     # --------------------------------------------------------------
-    async def encode_final(self, shorts_id: str) -> Optional[Shorts]:
-        """NVENC H.264 인코딩 + loudnorm(`14 LUFS) + atempo(1.05x) -> COMPLETED"""
+    async def encode_final(self, shorts_id: str, with_title: bool = True) -> Optional[Shorts]:
+        """NVENC H.264 인코딩 + loudnorm(`14 LUFS) + atempo(1.05x) -> COMPLETED
+        26일차: with_title=True 시 title_suggestion 오버레이 후 인코딩"""
 
         short = await self.shorts_repo.get_by_id(shorts_id)
         if not short:
             return None
-        
         if not short.output_path or not Path(short.output_path).exists():
             await self._fail_short(short, "인코딩할 영상이 없습니다.")
-            return None
-        
+            return None 
         short = await self.shorts_repo.update(short, {"status": ShortStatus.ENCODING})
         logger.info(f"최종 인코딩 시작: {shorts_id}")
-
         try:
-            # 제목이 없으면 선택 이유를 제목으로 사용
             if not short.title_suggestion and short.highlight_reason:
-                short = await self.shorts_repo.update(short, {
-                    "title_suggestion": short.highlight_reason[:200]
-                })
-
-            # 파일명: 제목 기반 (특수문자 제거, 없으면 shorts_id)
+                short = await self.shorts_repo.update(short, {"title_suggestion": short.highlight_reason[:200]})
+            encode_input = short.output_path
+            # 26일차: 제목 오버레이
+            if with_title and short.title_suggestion:
+                overlay_path = self._build_output_path(short, "titled")
+                ok = await apply_title_overlay(encode_input, str(overlay_path), short.title_suggestion)
+                if ok:
+                    encode_input = str(overlay_path)
+                    logger.info(f"제목 오버레이 적용: '{short.title_suggestion}'")
+                else:
+                    logger.warning(f"제목 오버레이 실패 - 원본으로 진행: {shorts_id}")
             filename = self._sanitize_filename(short.title_suggestion or shorts_id)
             final_path = settings.output_path / f"{filename}.mp4"
-            # 동일 파일명 충돌 방지
             if final_path.exists():
                 final_path = settings.output_path / f"{filename}_{shorts_id[:8]}.mp4"
-            success = await run_ffmpeg_encode(short.output_path, str(final_path))
+            success = await run_ffmpeg_encode(encode_input, str(final_path))
             if not success:
                 await self._fail_short(short, "FFmpeg 최종 인코딩 실패")
                 return None
-            
             short = await self.shorts_repo.update(short, {"output_path": str(final_path), "status": ShortStatus.COMPLETED})
-
             logger.info(f"최종 인코딩 완료: {shorts_id} -> {final_path}")
             return short
         except Exception as e:
@@ -294,7 +294,5 @@ class EditingService:
     def _sanitize_filename(name: str) -> str:
         """파일명에 사용할 수 없는 문자를 제거하고 길이 제한"""
 
-        if not any('\uAC00' <= c <= '\uD7A3' for c in (name or "")):
-            return "하이라이트"
-        safe = re.sub(r'[\\/*?:"<>|]', '', name).replace('\n', ' ').replace('\r', '').strip()
-        return re.sub(r'\s+', '_', safe)[:80] or "하이라이트"
+        from app.services.filename_builder import _sanitize
+        return _sanitize(name) or "하이라이트"

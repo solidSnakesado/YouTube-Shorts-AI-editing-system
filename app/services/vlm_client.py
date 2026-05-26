@@ -16,6 +16,7 @@ from loguru import logger
 from app.core.config import settings
 from app.core.llm_server import start_llm_server, stop_llm_server
 from app.services.frame_extractor import extract_frames
+from app.services.lora_utils import load_lora_model, unload_lora_model, frames_to_pil, lora_generate
 
 # parse_highlights 재사용: VLM 응답도 동일한 JSON 구조이므로 기존 파서 활용
 from app.services.llm_highlight_extractor import parse_highlights, MIN_DURATION_SEC, MAX_DURATION_SEC
@@ -169,9 +170,13 @@ def _build_vlm_text_prompt(frames: list[dict], transcript_data: dict, max_shorts
         "title_suggestion 작성 규칙 (필수):\n"
         "- 반드시 한국어로 작성\n"
         "- 15자 이내의 짧고 강렬한 문구\n"
-        "- 클릭을 유발하는 표현 사용 (예: '이거 실화?', '충격 반전', '역대급 순간', '못 믿겠지만...')\n"
+        "- 클릭을 유발하는 표현 사용\n"
+        "- 좋은 예: '이게 말이 돼?', '진짜 1초 차이', '이 장면만 5번 봤다', '아무도 몰랐던 사실', '결국 이렇게 됨', "
+        "'3번 죽을 뻔한 순간', '충격 반전', '역대급 순간', '못 믿겠지만...'\n"
+        "- 금지: '하이라이트', '이거 다시 본구간', '영상_#N' - 이런 표현 절대 사용 금지\n"
         "- 영상 원본 제목의 맥락을 반영하되 그대로 복사하지 말 것\n"
-        "- 숫자/이모지 활용 가능 (예: '3번 죽을 뻔한 순간')\n"
+        "- 쇼츠가 여러 개일 경우 각 제목을 서로 다르게 작성할 것\n"
+        "- 숫자/이모지 활용 가능\n"
     )
     parts.append("")
     parts.append(
@@ -224,40 +229,8 @@ def _call_vlm_api(messages: list[dict]) -> str:
 
 # --------------------------------------------------------------
 # LoRA 추론 - Unsloth/Transformers 직접 (22일차, Qwen2.5-VL-7B)
+# 모델 생명주기 헬퍼는 lora_utils.py 로 분리됨 (25일차)
 # --------------------------------------------------------------
-
-def _load_lora_model(adapter_path: str):
-    """LoRA 모델 + processor 로드 (공통)"""
-
-    from unsloth import FastVisionModel
-    from transformers import AutoProcessor
-    model, tokenizer = FastVisionModel.from_pretrained(model_name=adapter_path, load_in_4bit=True, max_seq_length=4096)
-    FastVisionModel.for_inference(model)
-    processor = AutoProcessor.from_pretrained(adapter_path)
-    return model, tokenizer, processor
-
-def _unload_lora_model(model, tokenizer, processor):
-    """LoRA 모델 VRAM 해제"""
-
-    del model, tokenizer, processor
-    import gc, torch
-    gc.collect()
-    torch.cuda.empty_cache()
-
-def _frames_to_pil(frames: list[dict], max_count: int = 3) -> list:
-    """base64 프레임 -> PIL 이미지 변환"""
-
-    from PIL import Image
-    import base64, io
-    return [Image.open(io.BytesIO(base64.b64decode(f["base64"]))) for f in frames[:max_count]]
-
-def _lora_generate(model, tokenizer, processor, messages, max_tokens=1024, temp=0.3) -> str:
-    """LoRA 모델로 생성 후 입력 토큰 제거하여 반환"""
-
-    inputs = processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
-    input_len = inputs["input_ids"].shape[1]
-    out = model.generate(**inputs, max_new_tokens=max_tokens, temperature=temp, do_sample=(temp > 0))
-    return tokenizer.decode(out[0][input_len:], skip_special_tokens=True)
 
 def _verify_highlights(frames: list[dict], candidates: list[dict], adapter_path: str) -> list[dict]:
     """판별기 LoRA로 각 후보의 적합성 검증 - scripts/verify_highlights.py 서브프로세스로 실행 (VRAM 분리)"""
@@ -267,9 +240,10 @@ def _verify_highlights(frames: list[dict], candidates: list[dict], adapter_path:
         _json.dump({"frames": frames, "candidates": candidates, "adapter_path": adapter_path}, f)
         tmp_path = f.name
     try:
+        env = {**os.environ, "UNSLOTH_SUPPRESS_WARNINGS": "1", "PYTHONWARNINGS": "ignore"}
         result = subprocess.run(
             [sys.executable, "-m", "scripts.verify_highlights", tmp_path],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=300, env=env
         )
         os.unlink(tmp_path)
         if result.returncode == 0:
@@ -289,11 +263,11 @@ def _verify_highlights(frames: list[dict], candidates: list[dict], adapter_path:
 def _run_lora_inference(frames: list[dict], transcript_data: dict, max_shorts: int, adapter_path: str) -> str:
     """Unsloth LoRA 직접 추론 (동기, run_in_executor로 호출)"""
 
-    model, tokenizer, processor = _load_lora_model(adapter_path)
-    images = _frames_to_pil(frames)
+    model, tokenizer, processor = load_lora_model(adapter_path)
+    images = frames_to_pil(frames)
     text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
     content = [{"type": "image"} for _ in images] + [{"type": "text", "text": text_prompt}]
-    result = _lora_generate(model, tokenizer, processor, [{"role": "user", "content": content}], temp=0.4)
-    _unload_lora_model(model, tokenizer, processor)
+    result = lora_generate(model, tokenizer, processor, [{"role": "user", "content": content}], temp=0.4)
+    unload_lora_model(model, tokenizer, processor)
     logger.info("LoRA 생성 완료")
     return result

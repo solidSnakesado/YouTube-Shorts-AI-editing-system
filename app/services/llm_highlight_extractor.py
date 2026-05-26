@@ -228,8 +228,7 @@ def _validate_highlight(h: dict, total_duration: float, chunk_start: float = 0.0
     
     # 시간 순서 검증
     if start < 0 or end <= start:
-        return None
-    
+        return None   
     # 17일차: 청크 범위 빆 하이라이트 제외 (오버랩 영역에서 반대편 청크 침범 방지)
     if start < chunk_start or end > total_duration:
         logger.debug(
@@ -292,7 +291,7 @@ def create_time_based_highlights(total_duration: float, max_shorts: int) -> list
             "start_sec": start, "end_sec": end,
             "hook_score": round(0.5 - i * 0.05, 4),
             "reason": f"시간 기반 자동 분할 #{i + 1} (음성 미감지)",
-            "title_suggestion": f"하이라이트 #{i + 1}", "tags": [],
+            "title_suggestion": f"{int(start//60):02d}분{int(start%60):02d}초_구간", "tags": [],
             "aspect_ratio": "9:16",
         })
     logger.info(f"시간 기반 하이라이트: {len(highlight)}개 (음성 없음)")

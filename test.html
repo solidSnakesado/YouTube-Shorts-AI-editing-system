@@ -91,6 +91,22 @@
           <option value="16:10">16:10</option>
         </select>
       </div>
+      <div style="display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:2px">
+        <label style="margin-bottom:8px">제목 삽입</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#a5b4fc;padding:8px 0">
+          <input type="checkbox" id="withTitle" checked
+            style="width:16px;height:16px;accent-color:#6366f1;cursor:pointer" />
+          <span id="withTitleLabel">ON</span>
+        </label>
+      </div>
+      <div style="width:120px">
+        <label>레이아웃</label>
+        <select id="layoutMode" style="width:100%;padding:10px 8px;font-size:13px;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-family:inherit"
+          title="crop: YOLO 피사체 추적 크롭 | letterbox: 블러 배경 레터박스">
+          <option value="crop">✂ 크롭</option>
+          <option value="letterbox">🖼 레터박스</option>
+        </select>
+      </div>
       <button class="btn btn-primary" onclick="runAll()">▶ 전체 실행</button>
       <button class="btn btn-secondary" onclick="resetAll()">↺ 초기화</button>
     </div>
@@ -337,12 +353,18 @@ async function runStep(id) {
     if (STEPS[id-1].skip) { addLog(`  → 보류 기능이므로 건너뜁니다`, "info"); return; }
     let epSuffix = "";
     if (id === 5) {
-      // 사용자 선택 비율 우선, 없으면 해당 쇼츠의 AI 추천 비율 사용
       const userAr = document.getElementById("aspectRatio").value;
       const aiAr = state.shorts[state.activeIdx]?.aspect_ratio;
       const ar = userAr || aiAr || "9:16";
-      epSuffix = `?aspect_ratio=${ar}`;
-      addLog(`  종횡비: ${ar}${aiAr && ar === aiAr ? " (AI 추천)" : " (사용자 지정)"}`, "info");
+      const layout = document.getElementById("layoutMode").value;
+      epSuffix = `?aspect_ratio=${ar}&layout=${layout}`;
+      addLog(`  종횡비: ${ar}${aiAr && ar === aiAr ? " (AI 추천)" : " (사용자 지정)"} | 레이아웃: ${layout === "crop" ? "✂ 크롭" : "🖼 레터박스"}`, "info");
+    }
+    if (id === 7) {
+      // 26일차: 제목 삽입 여부 파라미터 전달
+      const withTitle = document.getElementById("withTitle").checked;
+      epSuffix = `?with_title=${withTitle}`;
+      addLog(`  제목 삽입: ${withTitle ? "ON ✦ 영상에 제목 오버레이" : "OFF"}`, "info");
     }
     const d = await apiCall(`${API}/shorts/${sid}/${STEPS[id-1].ep}${epSuffix}`, { method:"POST" });
     if (d) { state.shorts = state.shorts.map(s => s.id === sid ? d : s); state.currentStep = id; if (d.status === "completed") addLog(`최종 출력: ${d.output_path}`, "success"); renderShorts(); updateStepUI(); }
@@ -376,6 +398,11 @@ async function resizeShort(idx) {
 }
 
 renderSteps(); updateStepUI();
+
+// 제목 삽입 토글 라벨 동기화
+document.getElementById("withTitle").addEventListener("change", function() {
+  document.getElementById("withTitleLabel").textContent = this.checked ? "ON" : "OFF";
+});
 
 // ============================================================
 // 탭 전환
