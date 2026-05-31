@@ -50,12 +50,36 @@ def load_dataset_jsonl(jsonl_path: Path) -> list[dict]:
     logger.info(f"데이터 로드: {len(samples)}개 샘플, {skipped}개 스킵")
     return samples
 
+def _build_meta_text(metadata: dict, instruction: str) -> str:
+    """판별기/생성기 메타데이터 형식에 따라 프롬프트 텍스트 생성"""
+
+    title = metadata.get("video_title", "알 수 없음")
+    duration = metadata.get("duration_sec", 0)
+
+    # 생성기: highlight_count 존재, segment_start 없음
+    if "highlight_count" in metadata:
+        return (
+            f"영상: {title}\n"
+            f"전체 길이: {duration:.0f}초\n\n"
+            f"{instruction}"
+        )
+    # 판별기: segment_start/segment_end 존재
+    return (
+        f"영상: {title}\n"
+        f"구간: {metadata.get('segment_start', 0):.1f}초 ~ "
+        f"{metadata.get('segment_end', 0):.1f}초\n"
+        f"전체 길이: {duration:.0f}초\n"
+        f"위치: {metadata.get('position_ratio', 0):.1%}\n\n"
+        f"{instruction}"
+    )
+
 def build_conversation_format(samples: list[dict]) -> list[dict]:
     """
     Unsloth SFT 학습용 대화 포맷으로 변환
     각 샘플 -> messages 리스트 (user: 이미지 + 텍스트, assistant: 라벨)
 
-    이미지 최대 3장 제한 - VRAM 절약 (비주얼 토큰 ~840개)
+    판별기: 이미지 최대 3장 제한 - VRAM 절약 (비주얼 토큰 ~840개)
+    생성기: 이미지 최대 5장 (다수 피크 커버)
     """
 
     conversations = []
@@ -65,18 +89,14 @@ def build_conversation_format(samples: list[dict]) -> list[dict]:
         metadata = sample.get("metadata", {})
         label = sample.get("output", "일반")
 
+        is_generator = "highlight_count" in metadata
+        max_images = 5 if is_generator else 3
+
         user_content = []
-        for img_path in images[:3]:
+        for img_path in images[:max_images]:
             user_content.append({"type": "image", "image": str(Path(img_path).resolve())})
 
-        meta_text = (
-            f"영상: {metadata.get('video_title', '알 수 없음')}\n"
-            f"구간: {metadata.get('segment_start', 0):.1f}초 ~ "
-            f"{metadata.get('segment_end', 0):.1f}초\n"
-            f"전체 길이: {metadata.get('duration_sec', 0):.0f}초\n"
-            f"위치: {metadata.get('position_ratio', 0):.1%}\n\n"
-            f"{instruction}"
-        )
+        meta_text = _build_meta_text(metadata, instruction)
         user_content.append({"type": "text", "text": meta_text})
 
         conversations.append({

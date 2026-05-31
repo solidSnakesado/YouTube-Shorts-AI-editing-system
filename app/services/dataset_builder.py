@@ -96,7 +96,7 @@ class DatasetBuilder:
         if self.mode == "generator":
             video_path = temp_dir / f"{vid}.mp4"
             try:
-                await self._download_video(vid, video_path, peaks)
+                await self._download_video_full(vid, video_path)     # 전체 다운로드 -> 절대 타임스탬프 보존
                 if not video_path.is_file():
                     raise RuntimeError(f"다운로드 실패: {vid}")
                 return await self._process_generator(video_path, vid, title, duration, peaks)
@@ -226,21 +226,39 @@ class DatasetBuilder:
         return [(s, s + seg_len) for s in chosen]
 
     async def _download_video(self, video_id: str, output_path: Path, peaks: list[dict]) -> None:
-        """yt-dlp로 최저 화질 다운로드 - 피크 구간만 선택적 다운로드로 용량 절약"""
+        """yt-dlp로 최저 화질 다운로드 - 판별기 모드 전용
+        주의: --download-sections는 클립 타임스탬프를 0 기준으로 리셋함
+             생성기 모드에서는 _download_video_full 사용
+        """
 
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        # Firefox 쿠키 자동 갱신 (매 다운로드 전 최신 쿠키 적용)
         cookie_file = Path("data/youtube_cookies.txt")
         refresh_firefox_cookies(str(cookie_file))
         cookie_opts = ["--cookies", str(cookie_file)] if cookie_file.is_file() else []
-        # 피크 구간 + 네거티브 여유분 (앞뒤 30초)만 다운로드
         section_opts: list[str] = []
         for p in peaks:
             s = max(0, p["start_sec"] - 30)
             e = p["end_sec"] + 30
             section_opts += ["--download-sections", f"*{s:.0f}-{e:.0f}"]
+        await self._run_ytdlp(video_id, output_path, cookie_opts, section_opts)
+
+    async def _download_video_full(self, video_id: str, output_path: Path) -> None:
+        """yt-dlp 전체 다운로드 (144p) - 생성기 모드 전용
+        --download-sections 미사용 -> 절대 타임스탬프 보존
+        """
+
+        cookie_file = Path("data/youtube_cookies.txt")
+        refresh_firefox_cookies(str(cookie_file))
+        cookie_opts = ["--cookies", str(cookie_file)] if cookie_file.is_file() else []
+        await self._run_ytdlp(video_id, output_path, cookie_opts, section_opts=[])
+        
+    async def _run_ytdlp(
+        self, video_id: str, output_path: Path,
+        cookie_opts: list[str], section_opts: list[str],
+    ) -> None:
+        """yt-dlp 실행 공통 로직"""
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
         cmd = [
-            # 144p video only (160=mp4, 394=av1) - 오디오 불필요, 업스케일 방지
             "yt-dlp", "-f", "160/394/worst[ext=mp4]/worst[vcodec!=none]",
             "-o", str(output_path), "--no-playlist",
             "--socket-timeout", str(settings.HEATMAP_REQUEST_TIMEOUT_SEC),
