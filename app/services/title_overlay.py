@@ -27,7 +27,7 @@ DISPLAY_SEC = 4.0                   # 제목 표시 시간 (초), 0이면 영상
 # 공개 API
 # --------------------------------------------------------------
 
-async def apply_title_overlay(input_path: str, output_path: str, title: str, diaplay_sec: float = DISPLAY_SEC) -> bool:
+async def apply_title_overlay(input_path: str, output_path: str, title: str, display_sec: float = DISPLAY_SEC) -> bool:
     """
     영상 상단에 제목 텍스트를 오버레이한다.
 
@@ -51,8 +51,8 @@ async def apply_title_overlay(input_path: str, output_path: str, title: str, dia
         return False
     
     sanitized = _sanitize_drawtext(title.strip())
-    font_path = _resolve_font_path
-    vf_filter = _build_drawtext_filter(sanitized, font_path, diaplay_sec)
+    font_path = _resolve_font_path()
+    vf_filter = _build_drawtext_filter(sanitized, font_path, display_sec)
 
     cmd = [
         "ffmpeg", "-y",
@@ -96,25 +96,45 @@ def _sanitize_drawtext(text: str) -> str:
 
 def _resolve_font_path() -> str:
     """
-    시스템에 설치된 Noto Sans CJK KR 폰트 경로를 반환
-    미설치 시 빈 문자열 반환 -> drawtext가 기본 폰트로 폴백
+    한글 지원 폰트 경로를 반환,
+    우선순위: Noto Sans CJK KR -> NanumGothic -> UnDotum
+    모두 없으면 빈 문자열 반환 -> 한글 깨짐 발생 (로그 경고)
     """
 
     import subprocess
-    try:
-        result = subprocess.run(["fc-list", "Noto Sans CJK KR", "--format=%{file}\n"], capture_output=True, text=True, timeout=5)
-        lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
-        if lines:
+
+    # 후보 폰트 이름 (우선순위 순)
+    candidates = [
+        "Noto Sans CJK KR",
+        "NanumGothic",
+        "UnDotum",
+        "Noto Sans CJK",
+    ]
+
+    for font_name in candidates:
+        try:
+            result = subprocess.run(["fc-list", font_name, "--format=%{file}\n"], capture_output=True, text=True, timeout=5)
+            lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+            if not lines:
+                continue
             # Regular 또는 Medium 굵기 우선
             for line in lines:
                 if "Regular" in line or "Medium" in line:
+                    logger.debug(f"폰트 선택: {line}")
                     return line
+            logger.debug(f"폰트 선택: {lines[0]}")
             return lines[0]
-    except Exception as e:
-        logger.warning(f"폰트 경로 조회 실패: {e}")
+        except Exception as e:
+            logger.warning(f"폰트 경로 조회 실패 ({font_name}): {e}")
+            continue
+
+    logger.error(
+        "한글 폰트 없음 -> 제목 깨짐 발생. "
+        "sudo apt install -y fonts-noto-cjk fonts-noto-cjk-extra 실행 후 재시도"
+    )
     return ""
 
-def _build_drawtext_filter(text: str, font_path: str, diaplay_sec: float) -> str:
+def _build_drawtext_filter(text: str, font_path: str, display_sec: float) -> str:
     """
     FFmpeg drawtext vf 필터 문자열 생성.
 
@@ -125,11 +145,18 @@ def _build_drawtext_filter(text: str, font_path: str, diaplay_sec: float) -> str
         - display_sec > 0 이면 해당 시간 이후 alpha=0 (숨김)
     """
 
-    font_opt = f":fontfile='{font_path}'" if font_path else ""
+    # TTC(컬렉션) 폰트는 KR 서브폰트 인덱스 지정 필요
+    # NotoSansCJK-Regular.ttc: JP=0, KR=1, SC=2, TC=3, HK=4
+    if font_path and font_path.endswith(".ttc"):
+        font_opt = f":fontfile='{font_path}':font='Noto Sans CJK KR'"
+    elif font_path:
+        font_opt = f":fontfile='{font_path}'"
+    else:
+        font_opt = ""
 
     # 표시 시간 제한 (alpha 채널 활용)
-    if diaplay_sec > 0:
-        enable = f":enable='between(t,0,{diaplay_sec})'"
+    if display_sec > 0:
+        enable = f":enable='between(t,0,{display_sec})'"
     else:
         enable = ""
 

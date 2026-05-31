@@ -23,93 +23,12 @@ from typing import Optional
 from loguru import logger
 
 from app.core.config import settings
-
-# --------------------------------------------------------------
-# 데이터 로드
-# --------------------------------------------------------------
-
-def load_dataset_jsonl(jsonl_path: Path) -> list[dict]:
-    """dataset.jsonl 로드 + 이미지 파일 존재 검증"""
-
-    if not jsonl_path.is_file():
-        raise FileExistsError(f"데이터셋 없음: {jsonl_path}")
-    
-    samples = []
-    skipped = 0
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                logger.warning(f"JSON 파싱 실패 (라인 {line_num})")
-                skipped += 1
-                continue
-
-            # 이미지 파일 존재 확인 (최소 1장)
-            images = record.get("images", [])
-            valid_images = [p for p in images if Path(p).is_file()]
-            if not valid_images:
-                skipped += 1
-                continue
-
-            record["images"] = valid_images
-            samples.append(record)
-    
-    logger.info(f"데이터 로드: {len(samples)}개 샘플, {skipped}개 스킵")
-    return samples
-
-def build_conversation_format(samples: list[dict]) -> list[dict]:
-    """
-    Unsloth SFT 학습용 대화 포맷으로 변환
-    각 샘플 -> {"messages": [{"role": "user", "content": [images + text]}, {"role": "assistant", "content": label}]}
-    """
-
-    conversations = []
-    for sample in samples:
-        images = sample.get("images", [])
-        instruction = sample.get("instruction", "")
-        metadata = sample.get("metadata", {})
-        label = sample.get("output", "일반")
-
-        # 유저 메시지: 이미지 + 메타데이터 + 질문
-        user_content = []
-
-        # 이미지 (최대 3장 - VRAM 절약, 비주얼 토큰 ~840개로 제한)
-        for img_path in images[:3]:
-            user_content.append({"type": "image", "image": str(Path(img_path).resolve())})
-
-        # 텍스트: 메타데이터 + 지시문
-        meta_text = (
-            f"영상: {metadata.get('video_title', '알 수 없음')}\n"
-            f"구간: {metadata.get('segment_start', 0):.1f}초 ~ "
-            f"{metadata.get('segment_end', 0):.1f}초\n"
-            f"전체 길이: {metadata.get('duration_sec', 0):.0f}초\n"
-            f"위치: {metadata.get('position_ratio', 0):.1%}\n\n"
-            f"{instruction}"
-        )
-        user_content.append({"type": "text", "text": meta_text})
-
-        # 어시스턴트 응답: 라벨
-        conversations.append({
-            "messages": [
-                {"role": "user", "content": user_content},
-                {"role": "assistant", "content": label},
-            ]
-        })
-    
-    logger.info(f"대화 포맷 변환 완료: {len(conversations)}개")
-    return conversations
-
-# --------------------------------------------------------------
-# 학습 메인
-# --------------------------------------------------------------
+from scripts.train_data_loader import load_dataset_jsonl, build_conversation_format
 
 def run_training(
     dataset_path: Path, output_dir: Path, epochs: int = 3, batch_size: int = 1, grad_accum: int = 4,
-    learning_rate: float = 2e-4, lora_r: int = 8, lora_alpha: int = 16, max_seq_length: int = 2048, seed: int = 42,
+    learning_rate: float = 2e-4, lora_r: int = 8, lora_alpha: int = 16, max_seq_length: int = 2048, 
+    seed: int = 42, resume: bool = False,
 ) -> None:
     """QLoRA 파인튜닝 실행"""
 
@@ -211,7 +130,16 @@ def run_training(
         f"학습 시작 | 에폭: {epochs} | 배치: {batch_size} | "
         f"grad_accum: {grad_accum} | lr: {learning_rate}"
     )
-    trainer.train()
+    # resume=True 시 최신 체크포인트에서 이어서 학습
+    resume_checkpoint = None
+    if resume:
+        ckpt_dir = output_dir / "checkpoints"
+        if ckpt_dir.exists():
+            ckpts = sorted(ckpt_dir.glob("checkpoint-*"), key=lambda x: int(x.name.split("-")[-1]))
+            if ckpts:
+                resume_checkpoint = str(ckpts[-1])
+                logger.info(f"체크포인트 재개: {resume_checkpoint}")
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     # 8) LoRA 어댑터 저장
     adapter_dir = output_dir / "adapter"
@@ -267,6 +195,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-r", type=int, default=8, help="LoRA rank (기본: 8)")
     parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha (기본: 16)")
     parser.add_argument("--adapter-type", type=str, default="classifier", choices=["classifier", "generator"], help="어댑터 타입 (기본: classifier)")
+    parser.add_argument("--resume", action="store_true", help="최신 체크포인트에서 이어서 학습")
     return parser.parse_args()
 
 def main() -> None:
@@ -294,6 +223,7 @@ def main() -> None:
         learning_rate=args.lr,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
+        resume=args.resume,
     )
 
 if __name__ == "__main__":
