@@ -8,9 +8,36 @@
 from pathlib import Path
 from loguru import logger
 
+# Whisper 상주 모드: init_whisper()로 로드, clenaup_whisper()로 언로드
+# 상주 모드 미사용 시 transcribe_video()가 매 호출마다 로드/언로드 (하위 호환)
+_model = None
+
+def init_whisper() -> None:
+    """Whisper 모델 상주 로드 (데이터셋 빌드 전 1회 호출)"""
+
+    global _model
+    if _model is not None:
+        return
+    from app.core.gpu_manager import load_whisper
+    _model = load_whisper()
+    logger.info("Whisper 상주 로드 완료 (데이터셋 빌드용)")
+
+def cleanup_whisper() -> None:
+    """Whisper 모델 언로드 (데이터셋 빌드 완료 후 호출, 미로드 시 no-op)"""
+
+    global _model
+    if _model is None:
+        return
+    from app.core.gpu_manager import unload_model
+    unload_model(_model, "Whisper")
+    _model = None
+
 def transcribe_video(video_path: Path) -> list[dict]:
     """
     faster-whisper로 영상 전사, 세그먼트 리스트 반환
+
+    상주 모드: init_whisper() 호출 후 사용 시 로드/언도르 생략 (~12초/영상 절약)
+    일반 모드: 매 호출마다 로드/언로드 (하위 호환)
 
     Args:
         video_path: 오디오 트랙이 포함된 영상 파일 경로
@@ -19,10 +46,16 @@ def transcribe_video(video_path: Path) -> list[dict]:
         [{"start": 0.0, "end": 3.5, "text": "안녕하세요"}, ...]
     """
 
-    from app.core.gpu_manager import load_whisper, unload_model
+    global _model
+    persistent = _model is not None
+
+    if persistent:
+        model = _model
+    else:
+        from app.core.gpu_manager import load_whisper
+        model = load_whisper()
 
     logger.info(f"Whisper 전사 시작: {video_path.name}")
-    model = load_whisper()
     try:
         segments, info = model.transcribe(
             str(video_path),
@@ -44,7 +77,9 @@ def transcribe_video(video_path: Path) -> list[dict]:
         )
         return result
     finally:
-        unload_model(model, "Whisper")
+        if not persistent:
+            from app.core.gpu_manager import unload_model
+            unload_model(model, "Whisper")
 
 def get_text_for_range(segments: list[dict], start: float, end: float) -> str:
     """

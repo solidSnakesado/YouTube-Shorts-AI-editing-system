@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.services.frame_extractor import extract_frames
 from app.services.dataset_utils import load_processed_ids, refresh_firefox_cookies
 from app.services.dataset_classifier import build_classifier_samples
-from app.services.dataset_transcriber import transcribe_video, get_text_for_range
+from app.services.dataset_transcriber import transcribe_video, get_text_for_range, init_whisper, cleanup_whisper
 
 class DatasetBuilder:
     """히트맵 피크 기반 VLM 파인튜닝 데이터셋 빌더"""
@@ -45,6 +45,8 @@ class DatasetBuilder:
         self._stats["total_videos"] = len(all_records)
         self._stats["filtered_videos"] = len(videos)
         logger.info(f"데이터셋 빌드 시작 | 전체: {len(all_records)}개 -> 선별: {len(videos)}개 (피크 {self.min_peak_count}개 이상)")
+        if self.mode == "generator" and settings.P2_WHISPER_TEXT:
+            init_whisper()
         for idx, video in enumerate(videos, 1):
             vid = video["video_id"]
             if vid in processed_ids:
@@ -59,6 +61,7 @@ class DatasetBuilder:
             except Exception as e:
                 logger.error(f"[{idx}/{len(videos)}] 실패: {vid} | {e}")
                 self._stats["skipped"] += 1
+        cleanup_whisper()
         logger.info(
             f"데이터셋 빌드 완료 | 처리: {self._stats['processed']}개, 스킵: {self._stats['skipped']}개 | "
             f"포지티브: {self._stats['positive_samples']}개, 네거티브: {self._stats['negative_samples']}개"
@@ -121,9 +124,7 @@ class DatasetBuilder:
             return []
         # Whisper 전사 (P2_WHISPER_TEXT=True일때)
         transcript = transcribe_video(video_path) if settings.P2_WHISPER_TEXT else []
-        instruction = (
-            "영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. 하이라이트가 없으면 빈 리스트로 반환하세요."
-        )
+        instruction = ("영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. 하이라이트가 없으면 빈 리스트로 반환하세요.")
         samples: list[dict] = []
         clip_dur = settings.P2_CLIP_DURATION_SEC
         for peak in norm_peaks:
@@ -144,9 +145,8 @@ class DatasetBuilder:
                 text = get_text_for_range(transcript, clip_start, clip_end) if transcript else ""
                 score = round(peak.get("avg_value", 0.5), 4)
                 highlight = {
-                    "start_sec": round(clip_start, 1), "end_sec": round(clip_end, 1),
-                    "hook_score": score, "reason": "시청자가 많이 다시 본 구간",
-                    "title_suggestion": f"{title[:25]}" if title else f"하이라이트",
+                    "start_sec": round(clip_start, 1), "end_sec": round(clip_end, 1), "hook_score": score, 
+                    "reason": "시청자가 많이 다시 본 구간", "title_suggestion": f"{title[:25]}" if title else f"하이라이트",
                     "tags": ["하이라이트"], "recommended_aspect_ratio": "16:9",
                 }
                 output = json.dumps({"highlights": [highlight]}, ensure_ascii=False)
