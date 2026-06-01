@@ -1,6 +1,7 @@
 # 계층: 스크립트 (CLI 진입점)
 # 역할: train_qlora.py 데이터 로드/포맷 변환 함수 분리 (300줄 원칙 대응)
 # 27일차 신규: dataset.jsonl -> QLoRA 학습 -> LoRA 어댑터 저장
+# 31일차: Phase 2 - 클립 구간 + Whisper 전사 텍스트 프롬프트 반영
 
 """QLoRA 학습용 데이터 로드 및 대화 포맷 변환"""
 
@@ -51,11 +52,23 @@ def load_dataset_jsonl(jsonl_path: Path) -> list[dict]:
     return samples
 
 def _build_meta_text(metadata: dict, instruction: str) -> str:
-    """판별기/생성기 메타데이터 형식에 따라 프롬프트 텍스트 생성"""
+    """판별기/생성기/Phase 2 메타데이터 형식에 따라 프롬프트 텍스트 생성"""
 
     title = metadata.get("video_title", "알 수 없음")
     duration = metadata.get("duration_sec", 0)
 
+    # Phase 2 생성기: clip_start 존재 (10초 클립 + Whisper 전사 텍스트)
+    if "clip_start" in metadata:
+        text = (
+            f"영상: {title}\n"
+            f"클립: {metadata['clip_start']:.1f}초 ~ {metadata['clip_end']:.1f}초\n"
+            f"전체 길이: {duration:.0f}초\n"
+        )
+        transcript = metadata.get("transcript", "")
+        if transcript:
+            text += f"전사: {transcript}\n"
+        text += f"\n{instruction}"
+        return text
     # 생성기: highlight_count 존재, segment_start 없음
     if "highlight_count" in metadata:
         return (
@@ -80,6 +93,7 @@ def build_conversation_format(samples: list[dict]) -> list[dict]:
 
     판별기: 이미지 최대 3장 제한 - VRAM 절약 (비주얼 토큰 ~840개)
     생성기: 이미지 최대 5장 (다수 피크 커버)
+    Phase 2 클립: 이미지 최대 10장 (1fps x 10초, 336px -> ~1,200토큰)
     """
 
     conversations = []
@@ -89,8 +103,9 @@ def build_conversation_format(samples: list[dict]) -> list[dict]:
         metadata = sample.get("metadata", {})
         label = sample.get("output", "일반")
 
+        is_p2_clip = "clip_start" in metadata
         is_generator = "highlight_count" in metadata
-        max_images = 5 if is_generator else 3
+        max_images = 10 if is_p2_clip else (5 if is_generator else 3)
 
         user_content = []
         for img_path in images[:max_images]:

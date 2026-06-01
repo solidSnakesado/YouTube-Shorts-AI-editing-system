@@ -2,7 +2,7 @@
 # 역할: Unsloth QLoRA 파인튜닝 실행 - Qwen2.5-VL-7B 멀티모달 하이라이트 판별
 # 의존: config.py, unsloth, transformers, trl, datasets, Pillow
 # 22일차 신규: dataset.jsonl -> QLoRA 학습 -> LoRA 어댑터 저장
-#   Gemma 4 E4B -> Qwen2.5-VL-7B 전환 (12GB VRAM 대응)
+# 31일차: Phase 2 --max-seq-length CLI 추가 (10프레임 클립 대응)
 #
 # 실행 방법: uv run python -m scripts.train_qlora [--adapter-type classifier|generator]
 # 사전 설치: uv pip install unsloth trl datasets pillow
@@ -195,6 +195,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-r", type=int, default=8, help="LoRA rank (기본: 8)")
     parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha (기본: 16)")
     parser.add_argument("--adapter-type", type=str, default="classifier", choices=["classifier", "generator"], help="어댑터 타입 (기본: classifier)")
+    parser.add_argument("--max-seq-length", type=int, default=2048, help="최대 시퀀스 길이 (기본: 2048, Phase 2 클립: 4096 권장)")
     parser.add_argument("--resume", action="store_true", help="최신 체크포인트에서 이어서 학습")
     return parser.parse_args()
 
@@ -223,6 +224,7 @@ def main() -> None:
         learning_rate=args.lr,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
+        max_seq_length=args.max_seq_length,
         resume=args.resume,
     )
 

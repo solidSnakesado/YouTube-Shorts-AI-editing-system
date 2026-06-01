@@ -1,6 +1,7 @@
 # 계층: 비즈니스 로직 계층 (Service 헬퍼)
 # 역할: 히트맵 JSONL -> 피크/비피크 구간 프레임 추출 -> VLM 파인튜닝 데이터셋 생성
 # 21일차 신규 / 24일차: generator 묶음 / 27일차: 쿠키 자동 갱신 + 구간 다운로드
+# 31일차: Phase 2 - 10초 클립 분할 + Whisper 전사 텍스트 연결
 
 """파인튜닝 데이터셋 빌더 - 히트맵 피크 기반 VLM 학습 데이터 생성"""
 
@@ -14,13 +15,13 @@ from app.core.config import settings
 from app.services.frame_extractor import extract_frames
 from app.services.dataset_utils import load_processed_ids, refresh_firefox_cookies
 from app.services.dataset_classifier import build_classifier_samples
+from app.services.dataset_transcriber import transcribe_video, get_text_for_range
 
 class DatasetBuilder:
     """히트맵 피크 기반 VLM 파인튜닝 데이터셋 빌더"""
 
-    def __init__(self, heatmap_path: Path, output_dir: Optional[Path] = None,
-        min_peak_count: Optional[int] = None, frames_per_segment: Optional[int] = None,
-        negative_ratio: Optional[float] = None, mode: str = "classifier",
+    def __init__(self, heatmap_path: Path, output_dir: Optional[Path] = None, min_peak_count: Optional[int] = None, 
+        frames_per_segment: Optional[int] = None, negative_ratio: Optional[float] = None, mode: str = "classifier",
     ):
         self.heatmap_path = Path(heatmap_path)
         self.mode = mode    # "classifier" (판별기) 또는 "generator" (생성기: 다수 JSON)
@@ -92,7 +93,6 @@ class DatasetBuilder:
         title = video.get("title", "")
         temp_dir = Path("temp") / "finetune"
         temp_dir.mkdir(parents=True, exist_ok=True)
-
         if self.mode == "generator":
             video_path = temp_dir / f"{vid}.mp4"
             try:
@@ -103,7 +103,6 @@ class DatasetBuilder:
             finally:
                 if video_path.is_file():
                     video_path.unlink()
-
         return await build_classifier_samples(
             vid=vid, title=title, duration=duration, peaks=peaks,
             temp_dir=temp_dir, negative_ratio=self.negative_ratio,
@@ -115,54 +114,70 @@ class DatasetBuilder:
         )
     
     async def _process_generator(self, video_path: Path, vid: str, title:str, duration: float, peaks: list[dict]) -> list[dict]:
-        """생성기 모드: 영상 전체 피크를 하나의 다수 하이라이트 샘플로 묶음"""
+        """생성기 모드 (Phase 2): 피크를 10초 클립으로 분할 + Whisper 전사 텍스트"""
 
         norm_peaks = self._normalize_peaks(peaks)
         if not norm_peaks:
             return []
-        all_frames: list[str] = []
-        valid_peaks: list[dict] = []
-        for peak in norm_peaks:
-            frames = await self._extract_segment_frames(video_path, vid, peak["start_sec"], peak["end_sec"])
-            if not frames:
-                continue
-            all_frames.extend(frames)
-            valid_peaks.append(peak)
-        if not valid_peaks:
-            return []
-        highlights = []
-        for i, p in enumerate(valid_peaks):
-            highlights.append({
-                "start_sec": round(p["start_sec"], 1), "end_sec": round(p["end_sec"], 1),
-                "hook_score": round(0.95 - i * 0.05, 2),
-                "reason": "시청자가 많이 다시 본 구간",
-                "title_suggestion": f"{title[:25]} #{i + 1}" if title else f"하이라이트 #{i + 1}",
-                "tags": ["게임", "하이라이트"], "recommended_aspect_ratio": "16:9",
-            })
-        output = json.dumps({"highlights": highlights}, ensure_ascii=False)
+        # Whisper 전사 (P2_WHISPER_TEXT=True일때)
+        transcript = transcribe_video(video_path) if settings.P2_WHISPER_TEXT else []
         instruction = (
-            "영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. "
-            "하이라이트가 없으면 빈 리스트를 반환하세요."
+            "영상 프레임과 전사 텍스트를 분석하여 쇼츠 하이라이트 구간을 JSON으로 추출하세요. 하이라이트가 없으면 빈 리스트로 반환하세요."
         )
-        meta = {"video_id": vid, "video_title": title, "duration_sec": duration, "highlight_count": len(highlights)}
-        self._stats["positive_samples"] += len(valid_peaks)
-        return [{"instruction": instruction, "images": all_frames, "metadata": meta, "output": output}]
+        samples: list[dict] = []
+        clip_dur = settings.P2_CLIP_DURATION_SEC
+        for peak in norm_peaks:
+            clip_start = peak["start_sec"]
+            while clip_start < peak["end_sec"]:
+                clip_end = min(clip_start + clip_dur, peak["end_sec"])
+                if clip_end - clip_start < clip_dur * 0.5:
+                    break   # 잔여 클립이 절반 미만이면 스킵
+                frames = await self._extract_segment_frames(
+                    video_path, vid, clip_start, clip_end,
+                    interval=settings.P2_FRAME_INTERVAL_SEC,
+                    max_frames=settings.P2_MAX_FRAMES_PER_CLIP,
+                    resolution=settings.P2_FRAME_RESOLUTION,
+                )
+                if not frames:
+                    clip_start = clip_end
+                    continue
+                text = get_text_for_range(transcript, clip_start, clip_end) if transcript else ""
+                score = round(peak.get("avg_value", 0.5), 4)
+                highlight = {
+                    "start_sec": round(clip_start, 1), "end_sec": round(clip_end, 1),
+                    "hook_score": score, "reason": "시청자가 많이 다시 본 구간",
+                    "title_suggestion": f"{title[:25]}" if title else f"하이라이트",
+                    "tags": ["하이라이트"], "recommended_aspect_ratio": "16:9",
+                }
+                output = json.dumps({"highlights": [highlight]}, ensure_ascii=False)
+                meta = {
+                    "video_id": vid, "video_title": title, "duration_sec": duration, 
+                    "clip_start": clip_start, "clip_end": clip_end, "highlight_count": 1,
+                }
+                if text:
+                    meta["transcript"] = text
+                samples.append({"instruction": instruction, "images": frames, "metadata": meta, "output": output})
+                self._stats["positive_samples"] += 1
+                clip_start = clip_end
+        return samples
 
-    # --------------------------------------------------------------
-    # 프레임 추출
-    # --------------------------------------------------------------
-
-    async def _extract_segment_frames(self, video_path: Path, video_id: str, start: float, end: float) -> list[str]:
-        """구간 프레임 추출 후 상대 경로 리스트 반환"""
+    async def _extract_segment_frames(
+            self, video_path: Path, video_id: str, start: float, end: float,
+            interval: Optional[float] = None, max_frames: Optional[int] = None,
+            resolution: Optional[int] = None,
+    ) -> list[str]:
+        """구간 프레임 추출 후 상대 경로 리스트 반환 (Phase 2: interval/max_frames/resolution 오버라이드)"""
 
         seg_duration = end - start
         if seg_duration <= 0:
             return []
-        interval = seg_duration / max(self.frames_per_segment, 1)
+        _interval = interval or (seg_duration / max(self.frames_per_segment, 1))
+        _max_frames = max_frames or self.frames_per_segment
+        _resolution = resolution or settings.FRAME_EXTRACT_RESOLUTION
         seg_dir = self.frames_dir / f"{video_id}_{int(start)}"
         results = await extract_frames(
-            video_path=video_path, interval_sec=interval, max_frames=self.frames_per_segment,
-            resolution=settings.FRAME_EXTRACT_RESOLUTION, start_sec=start, end_sec=end, save_dir=seg_dir,
+            video_path=video_path, interval_sec=_interval, max_frames=_max_frames,
+            resolution=_resolution, start_sec=start, end_sec=end, save_dir=seg_dir,
         )
         frame_paths = []
         for r in results:
@@ -173,10 +188,6 @@ class DatasetBuilder:
                 rel_path = abs_path
             frame_paths.append(str(rel_path))
         return frame_paths
-
-    # --------------------------------------------------------------
-    # 헬퍼
-    # --------------------------------------------------------------
 
     @staticmethod
     def _seg_metadata(vid: str, title: str, dur: float, start: float, end: float) -> dict:
@@ -198,7 +209,7 @@ class DatasetBuilder:
                 end = start + 30.0
             elif dur > 60.0:
                 end = start + 60.0
-            normalized.append({"start_sec": start, "end_sec": round(end, 1)})
+            normalized.append({"start_sec": start, "end_sec": round(end, 1), "avg_value": p.get("avg_value", 0.5)})
         return normalized
 
     @staticmethod
@@ -244,22 +255,27 @@ class DatasetBuilder:
     async def _download_video_full(self, video_id: str, output_path: Path) -> None:
         """yt-dlp 전체 다운로드 (144p) - 생성기 모드 전용
         --download-sections 미사용 -> 절대 타임스탬프 보존
+        Phase 2: P2_WHISPER_TEXT=True 시 오디오 포함 (Whisper 전사용)
         """
 
         cookie_file = Path("data/youtube_cookies.txt")
         refresh_firefox_cookies(str(cookie_file))
         cookie_opts = ["--cookies", str(cookie_file)] if cookie_file.is_file() else []
-        await self._run_ytdlp(video_id, output_path, cookie_opts, section_opts=[])
+        # Phase 2: 오디오 포함 다운로드 (Whisper 전사용)
+        fmt = "worst[ext=mp4]/worst" if settings.P2_WHISPER_TEXT else None
+        await self._run_ytdlp(video_id, output_path, cookie_opts, section_opts=[], fmt=fmt)
         
     async def _run_ytdlp(
         self, video_id: str, output_path: Path,
         cookie_opts: list[str], section_opts: list[str],
+        fmt: Optional[str] = None,
     ) -> None:
-        """yt-dlp 실행 공통 로직"""
+        """yt-dlp 실행 공통 로직 (fmt: 다운로드 포맷 오버라이드)"""
 
+        _fmt = fmt or "160/394/worst[ext=mp4]/worst[vcodec!=none]"
         url = f"https://www.youtube.com/watch?v={video_id}"
         cmd = [
-            "yt-dlp", "-f", "160/394/worst[ext=mp4]/worst[vcodec!=none]",
+            "yt-dlp", "-f", _fmt,
             "-o", str(output_path), "--no-playlist",
             "--socket-timeout", str(settings.HEATMAP_REQUEST_TIMEOUT_SEC),
             "--no-warnings", "--js-runtimes", "node",
