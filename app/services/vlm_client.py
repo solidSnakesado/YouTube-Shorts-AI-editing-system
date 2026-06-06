@@ -1,6 +1,7 @@
 # 계층: 비즈니스 로직 계층 (Service 헬퍼) | 의존: config, llm_server, frame_extractor
 # 역할: VLM 멀티모달 분석 오케스트레이션 (llama-server / 생성기 LoRA / 판별기 LoRA)
 # 23일차: 생성기 -> 판별기 LoRA 순차 파이프라인 추가
+# 31일차: Phase 2 슬라이딩 윈도우 추론으로 전환 (학습-추론 프롬프트 일치)
 
 """VLM 클라이언트 - 영상 프레임 + 텍스트 통합 분석 (Qwen2.5-VL-7B + LoRA)"""
 
@@ -52,41 +53,26 @@ async def run_vlm_analysis(source_path: str, transcript_data: dict, max_shorts: 
 
     total_duration = transcript_data.get("duration_sec", 0)
     target_dur = int(transcript_data.get("target_duration_sec") or 0)
-    ## 24일차: 영상 전체 군도으커버 (200초 이하는 기본 10초 간격)
-    dyn_interval = max(10.0, total_duration / 20) if total_duration > 200 else None
-    frames = await extract_frames(Path(source_path), interval_sec=dyn_interval)
-    if not frames:
-        logger.warning("프레임 추출 결과 없음 - 텍스트 전용 프롬프트로 폴백")
     loop = asyncio.get_event_loop()
 
     # 직접 어댑터 지정 (evaluate_lora.py 등 외부 호출)
     if lora_adapter_path and Path(lora_adapter_path).exists():
         logger.info(f"LoRA 단독 추론: {lora_adapter_path}")
+        frames = await _extract_default_frames(source_path, total_duration)
         text = await loop.run_in_executor(
             None, _run_lora_inference, frames, transcript_data, max_shorts, lora_adapter_path)
         return parse_highlights(text, total_duration, max_shorts, target_duration_sec=target_dur)
     
-    # LoRA 파이프라인: 생성기 -> 판별기 순차 실행
+    # 31일차: Phase 2 슬라이딩 윈도우 추론 (프레임 추출은 phase2_inference 내부에서 처리)
     gen_path = settings.lora_generator_path
-    cls_path = settings.lora_adapter_path
     if settings.LORA_ENABLED and gen_path.exists():
-        logger.info("LoRA 파이프라인: 생성기 -> 판별기")
-        gen_text = await loop.run_in_executor(
-            None, _run_lora_inference, frames, transcript_data, max_shorts, str(gen_path))
-        candidates = parse_highlights(gen_text, total_duration, max_shorts, target_duration_sec=target_dur)
-        logger.info(f"생성기 결과: {len(candidates)}개 후보")
-        if not candidates:
-            return []
-        if cls_path.exists():
-            verified = await loop.run_in_executor(None, _verify_highlights, frames, candidates, str(cls_path))
-            logger.info(f"판별기 결과: {len(verified)}/{len(candidates)}개 통과")
-            if not verified:
-                logger.warning("판별기 전체 탈락 - 생성기 결과 그대로 반환 (판별기 품질 개선 필요)")
-                return candidates
-            return verified
+        from app.services.phase2_inference import run_phase2_inference
+        candidates = await run_phase2_inference(source_path, transcript_data, max_shorts, str(gen_path))
+        logger.info(f"Phase 2 결과: {len(candidates)}개 후보")
         return candidates
 
     # 기존 경로: llama-server 서브프로세스
+    frames = await _extract_default_frames(source_path, total_duration)
     proc = None
     external_server = _is_server_running()
     try:
@@ -101,6 +87,15 @@ async def run_vlm_analysis(source_path: str, transcript_data: dict, max_shorts: 
     finally:
         if proc is not None:
             await loop.run_in_executor(None, stop_llm_server, proc)
+
+async def _extract_default_frames(source_path: str, total_duration: float) -> list[dict]:
+    """기본 프레임 추출 (20프레임, 전체 영상 커버)"""
+
+    dyn_interval = max(10.0, total_duration / 20) if total_duration > 200 else None
+    frames = await extract_frames(Path(source_path), interval_sec=dyn_interval)
+    if not frames:
+        logger.warning("프레임 추출 결과 없음")
+    return frames
 
 # --------------------------------------------------------------
 # 메시지 생성 - OpenAI 호환 멀티모달 포맷
@@ -266,7 +261,7 @@ def _run_lora_inference(frames: list[dict], transcript_data: dict, max_shorts: i
     model, tokenizer, processor = load_lora_model(adapter_path)
     images = frames_to_pil(frames)
     text_prompt = _build_vlm_text_prompt(frames, transcript_data, max_shorts)
-    content = [{"type": "image"} for _ in images] + [{"type": "text", "text": text_prompt}]
+    content = [{"type": "image", "image": img} for img in images] + [{"type": "text", "text": text_prompt}]
     result = lora_generate(model, tokenizer, processor, [{"role": "user", "content": content}], temp=0.4)
     unload_lora_model(model, tokenizer, processor)
     logger.info("LoRA 생성 완료")

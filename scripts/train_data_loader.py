@@ -57,23 +57,16 @@ def _build_meta_text(metadata: dict, instruction: str) -> str:
     title = metadata.get("video_title", "알 수 없음")
     duration = metadata.get("duration_sec", 0)
 
-    # Phase 2 생성기: clip_start 존재 (10초 클립 + Whisper 전사 텍스트)
-    if "clip_start" in metadata:
-        text = (
-            f"영상: {title}\n"
-            f"클립: {metadata['clip_start']:.1f}초 ~ {metadata['clip_end']:.1f}초\n"
-            f"전체 길이: {duration:.0f}초\n"
-        )
-        transcript = metadata.get("transcript", "")
-        if transcript:
-            text += f"전사: {transcript}\n"
-        text += f"\n{instruction}"
-        return text
     # 생성기: highlight_count 존재, segment_start 없음
+    # 31일차: Phase 2 - transcript + clip_start/clip_end 추가
     if "highlight_count" in metadata:
+        transcript = metadata.get("transcript", "")
+        transcript_line = f"음성 전사: {transcript}\n" if transcript else ""
         return (
             f"영상: {title}\n"
-            f"전체 길이: {duration:.0f}초\n\n"
+            f"전체 길이: {duration:.0f}초\n"
+            f"클립 구간: {metadata.get('clip_start', 0):.1f}초 ~ {metadata.get('clip_end', 0):.1f}초\n"
+            f"{transcript_line}\n"
             f"{instruction}"
         )
     # 판별기: segment_start/segment_end 존재
@@ -92,8 +85,7 @@ def build_conversation_format(samples: list[dict]) -> list[dict]:
     각 샘플 -> messages 리스트 (user: 이미지 + 텍스트, assistant: 라벨)
 
     판별기: 이미지 최대 3장 제한 - VRAM 절약 (비주얼 토큰 ~840개)
-    생성기: 이미지 최대 5장 (다수 피크 커버)
-    Phase 2 클립: 이미지 최대 10장 (1fps x 10초, 336px -> ~1,200토큰)
+    생성기: Phase 2: 이미지 최대 10장 (10초 클립 1fps) - 31일차 변경
     """
 
     conversations = []
@@ -103,9 +95,8 @@ def build_conversation_format(samples: list[dict]) -> list[dict]:
         metadata = sample.get("metadata", {})
         label = sample.get("output", "일반")
 
-        is_p2_clip = "clip_start" in metadata
         is_generator = "highlight_count" in metadata
-        max_images = 10 if is_p2_clip else (5 if is_generator else 3)
+        max_images = 5 if is_generator else 3      # 31일차: 5 -> 10 (Phase 2 1fps 10프레임)
 
         user_content = []
         for img_path in images[:max_images]:

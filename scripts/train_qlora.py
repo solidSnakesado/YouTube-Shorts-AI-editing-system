@@ -2,7 +2,8 @@
 # 역할: Unsloth QLoRA 파인튜닝 실행 - Qwen2.5-VL-7B 멀티모달 하이라이트 판별
 # 의존: config.py, unsloth, transformers, trl, datasets, Pillow
 # 22일차 신규: dataset.jsonl -> QLoRA 학습 -> LoRA 어댑터 저장
-# 31일차: Phase 2 --max-seq-length CLI 추가 (10프레임 클립 대응)
+#   Gemma 4 E4B -> Qwen2.5-VL-7B 전환 (12GB VRAM 대응)
+# 31일차: Phase 2 --max-seq-length CLI 추가 (10프레임 클립 대응), label_smoothing_factor + weight_decay 추가 (과적합 방지)
 #
 # 실행 방법: uv run python -m scripts.train_qlora [--adapter-type classifier|generator]
 # 사전 설치: uv pip install unsloth trl datasets pillow
@@ -96,6 +97,8 @@ def run_training(
         learning_rate=learning_rate,
         lr_scheduler_type="cosine",
         warmup_ratio=0.1,
+        # label_smoothing_factor=0.05,      # 31일차: 과적합 방지 - 라벨 노이즈 내성 향상, 으로 추가 했지만 모델 붕괴 원인으로 비활성화 
+        weight_decay=0.01,                  # 31일차: L2 정규화 - 파라미터 크기 제한
         fp16=False,
         bf16=True,
         logging_steps=10,
