@@ -199,7 +199,7 @@ def _load_heatmap(path: Path) -> list[dict]:
     return records
 
 async def _download_video(video_id: str, output_path: Path) -> None:
-    """yt-dlp 전체 다운로드 (144p)"""
+    """yt-dlp 전체 다운로드 (오디오 포함 - Whisper 전사용)"""       # 31일차 수정: 오디오 포함 포맷
 
     from app.services.dataset_utils import refresh_firefox_cookies
     cookie_file = Path("data/youtube_cookies.txt")
@@ -208,7 +208,8 @@ async def _download_video(video_id: str, output_path: Path) -> None:
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     cmd = [
-        "yt-dlp", "-f", "160/394/worst[ext=mp4]/worst[vcodec!=none]",
+        "yt-dlp", "-f", "bestvideo[height<=144]+bestaudio/worst[ext=mp4]/worst",                    # 31일차 수정: 160/394 -> worst (오디오 포함)
+        "--merge-output-format", "mp4",                                                             # 추가: FFmpeg 병합 시 mp4로 출력
         "-o", str(output_path), "--no-playlist",
         "--socket-timeout", str(settings.HEATMAP_REQUEST_TIMEOUT_SEC),
         "--no-warnings", "--js-runtimes", "node",
