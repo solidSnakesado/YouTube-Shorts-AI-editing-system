@@ -1,7 +1,8 @@
 # 계층: 스크립트 (CLI 진입점)
 # 역할: 판별기 LoRA 하이라이트 후보 검증 - vlm_client.py에서 subprocess로 호출
-# 의존: vlm_client.py (_load_lora_model, _frames_to_pil, _lora_generate, _unload_lora_model)
+# 의존: lora_utils.py (load_lora_model, frames_to_pil, lora_generate, unload_lora_model)
 # 23일차 신규: VRAM 완전 해제를 위해 별도 프로세스로 분리
+# 33일차: 25일차 리펙토링(헬퍼 lora_utils 분리) 반영 - 구식 vlm_client import 수정
 #
 # 사용법 (vlm_client.py 내부에서 자동 호출)
 #   python -m scripts.verify_highlights /tmp/verify_input.json
@@ -31,13 +32,13 @@ def main() -> None:
     candidates = data["candidates"]
     adapter_path = data["adapter_path"]
 
-    # vlm_client.py 헬퍼 함수 import
-    from app.services.vlm_client import (
-        _load_lora_model, _frames_to_pil, _lora_generate, _unload_lora_model,
+    # 33일차: 25일차 리펙토링 반영 - 헬퍼가 lora_utils로 분리/개명됨 (구 vlm_client._언더스토어 함수)
+    from app.services.lora_utils import (
+        load_lora_model, frames_to_pil, lora_generate, unload_lora_model,
     )
 
-    model, tokenizer, processor = _load_lora_model(adapter_path)
-    images = _frames_to_pil(frames)
+    model, tokenizer, processor = load_lora_model(adapter_path)
+    images = frames_to_pil(frames)
 
     verified = []
     for hl in candidates:
@@ -46,7 +47,7 @@ def main() -> None:
             f"하이라이트인지 판단하세요."
         )
         content = [{"type": "image"} for _ in images] + [{"type": "text", "text": prompt}]
-        result = _lora_generate(
+        result = lora_generate(
             model, tokenizer, processor,
             [{"role": "user", "content": content}],
             max_tokens=50, temp=0.1
@@ -54,7 +55,7 @@ def main() -> None:
         if "하이라이트" in result or "true" in result.lower():
             verified.append(hl)
 
-    _unload_lora_model(model, tokenizer, processor)
+    unload_lora_model(model, tokenizer, processor)
 
     # 결과를 stdout JSON으로 출력 (vlm_client.py에서 파싱)
     print(json.dumps(verified, ensure_ascii=False))

@@ -289,6 +289,12 @@ function renderShorts() {
           <option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option>
           <option value="4:5">4:5</option><option value="4:3">4:3</option><option value="16:10">16:10</option>
         </select><button class="btn btn-secondary" onclick="event.stopPropagation();resizeShort(${i})" style="padding:3px 8px;font-size:10px">리사이즈</button>` : ""}
+        <button onclick="event.stopPropagation();submitFeedback(${i},'ok')" style="padding:3px 8px;font-size:11px;background:${s.feedback==='ok'?'rgba(34,197,94,0.25)':'#0f172a'};border:1px solid ${s.feedback==='ok'?'#22c55e':'#334155'};border-radius:4px;cursor:pointer">👍</button>
+        <select id="fbReason${i}" onclick="event.stopPropagation()" style="padding:3px 4px;font-size:10px;background:#0f172a;border:1px solid #334155;border-radius:4px;color:#94a3b8;font-family:inherit">
+          <option value="selection">선택</option><option value="boundary">경계</option><option value="editing">편집</option>
+        </select>
+        <button onclick="event.stopPropagation();submitFeedback(${i},'no')" style="padding:3px 8px;font-size:11px;background:${s.feedback==='no'?'rgba(239,68,68,0.25)':'#0f172a'};border:1px solid ${s.feedback==='no'?'#ef4444':'#334155'};border-radius:4px;cursor:pointer">👎</button>
+        ${s.feedback ? `<span style="font-size:9px;color:${s.feedback==='ok'?'#22c55e':'#ef4444'}">${s.feedback}${s.feedback_reason?` (${s.feedback_reason})`:""}</span>` : ""}
         <span class="badge" style="background:${c}22;color:${c}">${s.status}</span>
       </div>
     </button>`;
@@ -296,6 +302,17 @@ function renderShorts() {
 }
 
 function selectShort(i) { state.activeIdx = i; renderShorts(); }
+
+// 33일차: 피드백 루프 B - OK/NO 피드백 제출 (POST /shorts/{id}/feedback)
+async function submitFeedback(i, fb) {
+  const s = state.shorts[i];
+  if (!s?.id) { showError("쇼츠 정보가 없습니다"); return; }
+  const body = { feedback: fb };
+  if (fb === "no") body.feedback_reason = document.getElementById(`fbReason${i}`)?.value || "selection";
+  addLog(`[피드백] #${i+1} → ${fb}${body.feedback_reason ? ` (${body.feedback_reason})` : ""}`);
+  const d = await apiCall(`${API}/shorts/${s.id}/feedback`, { method:"POST", body: JSON.stringify(body) });
+  if (d) { state.shorts = state.shorts.map(x => x.id === s.id ? d : x); addLog(`피드백 저장됨: ${d.feedback}${d.feedback_reason ? ` (${d.feedback_reason})` : ""}`, "success"); renderShorts(); }
+}
 
 function addLog(msg, type="info") {
   const ts = new Date().toLocaleTimeString("ko-KR");

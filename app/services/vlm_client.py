@@ -23,7 +23,11 @@ from app.services.lora_utils import load_lora_model, unload_lora_model, frames_t
 from app.services.llm_highlight_extractor import parse_highlights, MIN_DURATION_SEC, MAX_DURATION_SEC
 
 def is_vlm_available() -> bool:
-    """VLM 사용 가능 여부 (llama-server + GGUF + mmproj 존재 확인)"""
+    """VLM 사용 가능 여부 (llama-server + GGUF + mmproj 존재 확인)
+    33일차: LoRA 경로는 Unsloth 직접 추론이라 llama-server/mmproj 불필요 -> 단락 처리"""
+
+    if settings.LORA_ENABLED and (settings.lora_generator_path.exists() or settings.lora_phase1_path.exists()):
+        return True
 
     server_ok = Path(settings.LLAMA_SERVER_PATH).is_file()
     mmproj_ok = settings.mmproj_model_file.is_file()
@@ -64,7 +68,32 @@ async def run_vlm_analysis(source_path: str, transcript_data: dict, max_shorts: 
         return parse_highlights(text, total_duration, max_shorts, target_duration_sec=target_dur)
     
     # 31일차: Phase 2 슬라이딩 윈도우 추론 (프레임 추출은 phase2_inference 내부에서 처리)
+    # 33일차: LORA_PIPELINE=phase1 시 Phase 1 생성기 단독 1회 추론 (품질 비교 테스트, 판별기 제외)
     gen_path = settings.lora_generator_path
+    if settings.LORA_ENABLED and settings.LORA_PIPELINE == "phase1":
+        p1_path = settings.lora_phase1_path
+        if not p1_path.exists():
+            logger.error(f"Phase 1 어댑터 없음: {p1_path}")
+            return []
+        logger.info(f"Phase 1 생성기 추론 (품질 비교 테스트): {p1_path}")
+        frames = await _extract_default_frames(source_path, total_duration)
+        text = await loop.run_in_executor(
+            None, _run_lora_inference, frames, transcript_data, max_shorts, str(p1_path))
+        candidates = parse_highlights(text, total_duration, max_shorts, target_duration_sec=target_dur)
+
+        # 33일차 (테스트 b): 판별기 검증 - 서브프로세스 VRAM 분리, 실패 시 후보 그대로 통과
+        version_tag = str(p1_path)
+        if settings.LORA_PHASE1_VERIFY and settings.lora_adapter_path.exists():
+            logger.info(f"Phase 1 판별기 검증: {settings.lora_adapter_path}")
+            candidates = await loop.run_in_executor(
+                None, _verify_highlights, frames, candidates, str(settings.lora_adapter_path))
+            version_tag += "+verified"      # A/B 구분 생성기 단독 vs 생성기 + 판별기
+
+        for h in candidates:
+            h["_model_version"] = version_tag
+        logger.info(f"Phase 1  결과: {len(candidates)}개 후보")
+        return candidates
+
     if settings.LORA_ENABLED and gen_path.exists():
         from app.services.phase2_inference import run_phase2_inference
         candidates = await run_phase2_inference(source_path, transcript_data, max_shorts, str(gen_path))

@@ -286,12 +286,12 @@ class AnalysisService:
             shorts = Shorts(
                 project_id=project_id,
                 start_sec=h["start_sec"], end_sec=h["end_sec"],
-                hook_score=h.get("hook_score"),
-                highlight_reason=h.get("reason"),
+                hook_score=h.get("hook_score"), highlight_reason=h.get("reason"),
                 title_suggestion=h.get("title_suggestion"),
-                tags_suggestion=json.dumps(h.get("tags", []), ensure_ascii=False),          # tags는 리스트 -> JSON 문자열로 변환하여 저장
-                aspect_ratio=h.get("aspect_ratio", "9:16"),                                 # 21일차: AI 추천 종횡비
-                status=ShortStatus.QUEUED,                                                  # 초기 상태: 편집 대기
+                tags_suggestion=json.dumps(h.get("tags", []), ensure_ascii=False),          
+                aspect_ratio=h.get("aspect_ratio", "9:16"), status=ShortStatus.QUEUED,    
+                train_sample_json=h.get("_train_sample_json"),      # 33일차: 재학습 입력 보존
+                model_version=h.get("_model_version"),              # 33일차: 어댑터 버전                                              
             )
             created = await self.shorts_repo.create(shorts)                             
             shorts_list.append(created)

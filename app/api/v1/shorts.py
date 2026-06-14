@@ -19,10 +19,11 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.dependencies import get_analysis_service, get_editing_service
-from app.schemas.api import ShortResponse, ShortsListResponse
+from app.core.dependencies import get_analysis_service, get_editing_service, get_feedback_service
+from app.schemas.api import FeedbackRequest, ShortResponse, ShortsListResponse
 from app.services.analysis_service import AnalysisService
 from app.services.editing_service import EditingService
+from app.services.feedback_service import FeedbackService   # 33일차: 피드백 루프
 
 # APIRouter() 괄호 필수
 # router = APIRouter    <- 클래스 자체를 할당
@@ -158,6 +159,31 @@ async def resize_shorts(
     if not result:
         raise HTTPException(status_code=500, detail="리사이징에 실패했습니다.")
     
+    return ShortResponse(
+        **result.__dict__,
+        duration_sec=round(result.end_sec - result.start_sec, 3),
+    )
+
+@router.post("/{shorts_id}/feedback", response_model=ShortResponse)
+async def submit_feedback(
+    shorts_id: str,
+    body: FeedbackRequest,
+    feedback_svc: FeedbackService = Depends(get_feedback_service),
+):
+    """
+    쇼츠 피드백 제출 - 33일차 신규 (피드백 루프 C)
+
+    POST /api/v1/shorts/{shorts_id}/feedback
+    Body: {"feedback": "ok"} 또는 {"feedback": "no", "feedback_reason": "boundary"}
+
+    feedback: ok(좋은 쇼츠) | no(나쁜 쇼츠) - 재학습 라벨 신호
+    feedback_reason: NO 사유 (selection/boundary/editing) - 입도 분리, OK일 땐 무시
+    허용값 외 입력은 422 자동 거부 (Pydantic Literal 검증)
+    """
+
+    result = await feedback_svc.submit_feedback(shorts_id, body.feedback, body.feedback_reason)
+    if not result:
+        raise HTTPException(status_code=404, detail="쇼츠를 찾을 수 없습니다.")
     return ShortResponse(
         **result.__dict__,
         duration_sec=round(result.end_sec - result.start_sec, 3),

@@ -155,6 +155,10 @@ def parse_highlights(llm_response: str, total_duration: float, max_shorts: int, 
         logger.error(f"JSON 추출 실패: {llm_response[:200]}")
         return []
     
+    if not isinstance(raw, dict):       # 33일차: json.loads는 JSON 배열도 허용 -> dict 아니면 .get 크래시 (방어 가드)
+        logger.error(f"JSON 객체가 아님 (type: {type(raw).__name__}): {llm_response[:100]}")
+        return []
+    
     highlights_raw = raw.get("highlights", [])
     if not isinstance(highlights_raw, list):
         logger.error(f"highlights가 리스트가 아님: {type(highlights_raw)}")

@@ -40,6 +40,7 @@ from app.repositories.shorts_repository import ShortsRepository
 from app.services.video_service import VideoService
 from app.services.analysis_service import AnalysisService
 from app.services.editing_service import EditingService
+from app.services.feedback_service import FeedbackService   # 33일차: 피드백 루프
 
 # --------------------------------------------------------------
 # 레포지토리 계층 (DB 세션을 주입받아 레포지토리 생성)
@@ -88,3 +89,13 @@ def get_editing_service(
     8~10일차 변경: ProjectRepository 추가 (소스 영상 경로 조회용)
     """
     return EditingService(shorts_repo, project_repo)
+
+# 33일차: 피드백 서비스 (피드백 루프 C)
+def get_feedback_service(
+    shorts_repo: ShortsRepository = Depends(get_short_repo),
+) -> FeedbackService:
+    """
+    피드백 서비스 생성, 쇼츠 레포지토리를 주입받아 초기화
+    """
+
+    return FeedbackService(shorts_repo)

@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     LORA_OUTPUT_DIR: str ="./models/lora/heatmap_adapter"                               # 판별기 어댑터 경로
     LORA_GENERATOR_DIR: str = "./models/lora/heatmap_generator"                         # 생성기 어댑터 경로
     LORA_ENABLED: bool = False                                                          # True면 추론 시 LoRA 어댑터 로드
+    # 33일차: Phase 1/2 품질 비교 테스트용 파이프라인 전환
+    LORA_PIPELINE: str = "phase2"                                                       # "phase2"(회귀 슬라이딩 윈도우) | "phase1"(생성기 단독 1회 추론)
+    LORA_PHASE1_ADAPTER: str = "adapter_backup_0246"                                    # Phase 1 생성기 어댑터 디렉토리명 (LORA_GENERATOR_DIR 하위)
+    LORA_PHASE1_VERIFY: bool = False                                                    # True면 Phase 1 후보를 판별기로 추가 검증 (테스트 b)
 
     # --------------------------------------------------------------
     # 외부 API (선택 사항)
@@ -264,6 +268,12 @@ class Settings(BaseSettings):
         """생성기 LoRA 어댑터 경로"""
 
         return Path(self.LORA_GENERATOR_DIR) / "adapter"
+    
+    @property
+    def lora_phase1_path(self) -> Path:
+        """33일차: Phase 1 생성기 어댑터 경로 (품질 비교 테스트용)"""
+
+        return Path(self.LORA_GENERATOR_DIR) / self.LORA_PHASE1_ADAPTER
     
 # 최초 1회만 Settings 객체 생성, 이후 호출에서는 캐시된 동일 객체 반환
 @lru_cache

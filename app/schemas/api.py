@@ -16,7 +16,7 @@ Pydantic 모델로 요청/응답 형식을 정의
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 # BaseModel: Pydantic 기반 데이터 검증 클래스
 # Field: 필드 제약조건 정의 (최소값, 최대값, 기본값 등)
@@ -81,17 +81,30 @@ class ShortResponse(BaseModel):
     id: str
     project_id: str
     status: str
-    start_sec: float                    # 시작 시점 (초)
-    end_sec: float                      # 끝 시점 (초)
-    duration_sec: Optional[float]       # end - start 계산값 (API에서 편의 제공)
-    highlight_reason: Optional[str]     # LLM의 선정 사유
-    hook_score: Optional[float]         # 흥미도 점수 (0~1)
-    output_path: Optional[str]          # 완성된 파일 경로
-    title_suggestion: Optional[str]     # 제안 제목
-    tags_suggestion: Optional[str]      # 제안 태그 (JSON 배열)
+    start_sec: float                        # 시작 시점 (초)
+    end_sec: float                          # 끝 시점 (초)
+    duration_sec: Optional[float]           # end - start 계산값 (API에서 편의 제공)
+    highlight_reason: Optional[str]         # LLM의 선정 사유
+    hook_score: Optional[float]             # 흥미도 점수 (0~1)
+    output_path: Optional[str]              # 완성된 파일 경로
+    title_suggestion: Optional[str]         # 제안 제목
+    tags_suggestion: Optional[str]          # 제안 태그 (JSON 배열)
+    feedback: Optional[str] = None          # 33일차: 사람 평가 (ok/no), UI 상태 표시용
+    feedback_reason: Optional[str] = None   # 33일차: NO 사유 (selection/boundary/editing)
     created_at: datetime                
 
     model_config = {"from_attributes": True}
+
+# 33일차: 피드백 제출 요청 (피드백 루프 C)
+class FeedbackRequest(BaseModel):
+    """쇼츠 피드백 제출 요청
+    
+    Literal 검증으로 허용값 외 입력은 422 자동 거부
+    -> D(학습데이터 변환)에서 파싱 안정성 보장
+    """
+
+    feedback: Literal["ok", "no"]                                                   # 사람 평가
+    feedback_reason: Optional[Literal["selection", "boundary", "editing"]] = None   # NO 사요 (선택)
 
 class ShortsListResponse(BaseModel):
     """
