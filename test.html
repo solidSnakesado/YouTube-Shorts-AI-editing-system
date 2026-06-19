@@ -41,6 +41,12 @@
   .short-btn.active { background: rgba(99,102,241,0.1); border-color: #6366f1; }
   .short-num { font-size: 10px; font-weight: 700; color: #6366f1; background: rgba(99,102,241,0.15); padding: 2px 8px; border-radius: 4px; }
   .score { color: #f59e0b; font-size: 11px; }
+  /* 36일차: 카드별 원본 영상 구간 재생 */
+  .short-card { margin-bottom: 12px; }
+  .short-video { display: block; width: 100%; max-width: 380px; border-radius: 8px; background: #000; margin-top: 2px; }
+  .short-skip { display: flex; gap: 6px; margin-top: 4px; }
+  .short-skip button { padding: 3px 10px; font-size: 11px; font-family: inherit; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #94a3b8; cursor: pointer; }
+  .short-skip button:hover { border-color: #6366f1; color: #e2e8f0; }
   .error-bar { background: rgba(239,68,68,0.1); border: 1px solid #7f1d1d; border-radius: 8px; padding: 10px 16px; font-size: 13px; color: #fca5a5; display: flex; justify-content: space-between; align-items: center; }
   .log-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #1e293b; }
   .log-body { height: 260px; overflow-y: auto; padding: 8px 16px; }
@@ -108,6 +114,7 @@
         </select>
       </div>
       <button class="btn btn-primary" onclick="runAll()">▶ 전체 실행</button>
+      <button class="btn" onclick="runFinal()" style="background:linear-gradient(135deg,#10b981,#22c55e);color:white" title="피드백 있으면 OK만, 없으면 전체를 5→7로 최종 처리 (1~4 재실행 안 함, 라벨 보존)">✂ 최종 처리</button>
       <button class="btn btn-secondary" onclick="resetAll()">↺ 초기화</button>
     </div>
   </div>
@@ -227,6 +234,7 @@
 
 <script>
 const API = `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
+const STATIC = API.replace("/api/v1", "");   // 36일차: 정적 파일(원본 영상) 베이스 URL
 const STEPS = [
   { id:1, label:"프로젝트 생성", ep:"create", desc:"유튜브 URL로 프로젝트 생성" },
   { id:2, label:"다운로드",     ep:"download", desc:"yt-dlp + 오디오 추출" },
@@ -276,7 +284,10 @@ function renderShorts() {
   el.innerHTML = state.shorts.map((s, i) => {
     const c = STATUS_CLR[s.status] || "#6b7280";
     const canResize = s.output_path && s.status !== "failed";
-    return `<button class="short-btn${i === state.activeIdx ? " active" : ""}" onclick="selectShort(${i})">
+    // 36일차: 카드별 원본 영상 구간 재생 (#t로 시작점 seek, ontimeupdate로 끝점 정지, onplay로 재생 시 시작점 복귀)
+    const hasSeg = state.projectId && s.start_sec != null && s.end_sec != null;
+    const videoTag = hasSeg ? `<video id="vid${i}" class="short-video" controls preload="metadata" data-start="${s.start_sec}" data-end="${s.end_sec}" src="${STATIC}/static/temp/${state.projectId}/source.mp4#t=${s.start_sec},${s.end_sec}" onplay="if(this.currentTime>=${s.end_sec}-0.05||this.currentTime<${s.start_sec})this.currentTime=${s.start_sec}" ontimeupdate="if(this.currentTime>=${s.end_sec})this.pause()"></video><div class="short-skip"><button onclick="skipVideo(${i},-5)">« 5초</button><button onclick="skipVideo(${i},5)">5초 »</button></div>` : "";
+    return `<div class="short-card"><button class="short-btn${i === state.activeIdx ? " active" : ""}" onclick="selectShort(${i})">
       <div style="display:flex;align-items:center;gap:10px">
         <span class="short-num">#${i+1}</span>
         <span>${s.start_sec?.toFixed(1)}s – ${s.end_sec?.toFixed(1)}s</span>
@@ -297,11 +308,19 @@ function renderShorts() {
         ${s.feedback ? `<span style="font-size:9px;color:${s.feedback==='ok'?'#22c55e':'#ef4444'}">${s.feedback}${s.feedback_reason?` (${s.feedback_reason})`:""}</span>` : ""}
         <span class="badge" style="background:${c}22;color:${c}">${s.status}</span>
       </div>
-    </button>`;
+    </button>${videoTag}</div>`;
   }).join("");
 }
 
 function selectShort(i) { state.activeIdx = i; renderShorts(); }
+
+// 36일차: 재생 중 ±5초 이동 (구간 [start,end] 내로 클램프)
+function skipVideo(i, delta) {
+  const v = document.getElementById("vid" + i);
+  if (!v) return;
+  const start = parseFloat(v.dataset.start), end = parseFloat(v.dataset.end);
+  v.currentTime = Math.min(end, Math.max(start, v.currentTime + delta));
+}
 
 // 33일차: 피드백 루프 B - OK/NO 피드백 제출 (POST /shorts/{id}/feedback)
 async function submitFeedback(i, fb) {
@@ -398,6 +417,23 @@ async function runAll() {
     for (let i = 5; i <= 7; i++) { if (STEPS[i-1].skip) { addLog(`[Step ${i}] ${STEPS[i-1].label} — 건너뜀`, "info"); continue; } await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
   }
   addLog(`\n✅ 전체 완료! ${state.shorts.length}개 쇼츠 생성`, "success");
+}
+
+// 36일차: 최종 처리 — 1~4 재실행 없이 5→7만 수행. 피드백 있으면 OK만, 없으면 전체. (라벨 보존)
+async function runFinal() {
+  if (!state.shorts.length) { showError("먼저 하이라이트(4단계)를 실행하세요"); return; }
+  const anyFeedback = state.shorts.some(s => s.feedback != null);
+  const okShorts = state.shorts.filter(s => s.feedback === "ok");
+  if (anyFeedback && okShorts.length === 0) { showError("OK로 라벨된 쇼츠가 없습니다 — 최종 처리할 대상 없음"); return; }
+  const mode = anyFeedback ? `피드백 기준: OK ${okShorts.length}개만 처리` : `피드백 없음: 전체 ${state.shorts.length}개 처리`;
+  addLog(`━━━ 최종 처리 시작 (${mode}) ━━━`, "info");
+  for (let si = 0; si < state.shorts.length; si++) {
+    if (anyFeedback && state.shorts[si].feedback !== "ok") { addLog(`쇼츠 #${si+1} 건너뜀 (OK 아님)`, "info"); continue; }
+    state.activeIdx = si; renderShorts();
+    addLog(`━━━ 쇼츠 #${si+1} 최종 처리 ━━━`, "info");
+    for (let i = 5; i <= 7; i++) { if (STEPS[i-1].skip) { addLog(`[Step ${i}] ${STEPS[i-1].label} — 건너뜀`, "info"); continue; } await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
+  }
+  addLog(`✅ 최종 처리 완료`, "success");
 }
 
 function resetAll() {

@@ -228,8 +228,7 @@ def _validate_highlight(h: dict, total_duration: float, chunk_start: float = 0.0
         start = float(h.get("start_sec", -1))
         end = float(h.get("end_sec", -1))
     except (TypeError, ValueError):
-        return None
-    
+        return None  
     # 시간 순서 검증
     if start < 0 or end <= start:
         return None   
@@ -240,7 +239,6 @@ def _validate_highlight(h: dict, total_duration: float, chunk_start: float = 0.0
             f"청크 범위: [{chunk_start:.1f} - {total_duration:.1f}]"
         )
         return None
-
     # 최대 길이 초과 시 잘라내기 (13일차 추가)
     if end - start > MAX_DURATION_SEC:
         end = start + MAX_DURATION_SEC

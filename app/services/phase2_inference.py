@@ -175,7 +175,9 @@ async def run_phase2_inference(source_path: str, transcript_data: dict, max_shor
             score = _parse_engagement(result)
             if score is not None:
                 # 33일차: 재학습용 프레임 보존 + 메타데이터 태깅
-                frame_paths = _save_train_frames(images, Path(source_path).stem, w_start)
+                # 34일차: video_stem을 project_id(부모 디렉토리명)로 - 모든 영상이 source.mp4라
+                #   stem이 'source'로 동일 -> 영상 간 프레임 덮어쓰기/오염 + 영상 카운트 1개 버그 수정
+                frame_paths = _save_train_frames(images, Path(source_path).parent.name, w_start)
                 train_sample = json.dumps({
                     "frame_paths": frame_paths,
                     "prompt": prompt,

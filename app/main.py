@@ -84,6 +84,8 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api/v1")
 # output/ 디렉토리를 /static/outputs 로 서빙 (24일차: 쇼츠 재생 기능)
 app.mount("/static/outputs", StaticFiles(directory=str(settings.output_path)), name="outputs")
+# 36일차: temp/ 를 /static/temp 로 서빙 (라벨링용 원본 영상 재생, Range 자동 지원)
+app.mount("/static/temp", StaticFiles(directory=str(settings.temp_path)), name="temp")
 
 # --------------------------------------------------------------
 # 헨스 체크 엔드포인트
