@@ -291,7 +291,7 @@ class AnalysisService:
                 tags_suggestion=json.dumps(h.get("tags", []), ensure_ascii=False),          
                 aspect_ratio=h.get("aspect_ratio", "9:16"), status=ShortStatus.QUEUED,    
                 train_sample_json=h.get("_train_sample_json"),      # 33일차: 재학습 입력 보존
-                model_version=h.get("_model_version"),              # 33일차: 어댑터 버전                                              
+                model_version=h.get("_model_version"), is_exploration=h.get("is_exploration", False)  # 33일차: 어댑터 버전 / 36일차(F): 탐색샘플여부                                         
             )
             created = await self.shorts_repo.create(shorts)                             
             shorts_list.append(created)

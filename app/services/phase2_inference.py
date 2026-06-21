@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+import random
 from pathlib import Path
 
 from loguru import logger
@@ -194,6 +195,7 @@ async def run_phase2_inference(source_path: str, transcript_data: dict, max_shor
                     "reason": f"참여도 예측 {score:.2f} (회귀 모델, 탐지 구간 {w_start:.0f}~{w_end:.0F})",
                     "_train_sample_json": train_sample,
                     "_model_version": str(adapter_path),
+                    "is_exploration": False,    # 36일차(F): 기본 활용, 탐색 선택 시 True로 갱신
                 })
             
             # 진행 로그 (20% 단위)
@@ -202,16 +204,50 @@ async def run_phase2_inference(source_path: str, transcript_data: dict, max_shor
     finally:
         unload_lora_model(model, tokenizer, processor)
 
-    # hook_score 기준 정렬 + greedy 겹침 억제 선택 (33일차: 확장 클립 간 중복 방지)
+    # 36일차(F): quota 선택 - 활용(top-K) + 탐색(저득점 랜덤)으로 재학습 커버리지 확대
     all_highlights.sort(key=lambda h: h.get("hook_score", 0), reverse=True)
+    explore_n = max(0, settings.EXPLORATION_COUNT)      # 탐색 슬롯 수 (0이면 순수 활용=기존 동작)
+    exploit_n = max(0, max_shorts - explore_n)          # 활용 슬롯 수
+
+    def _fits(cand: dict, chosen: list) -> bool:
+        """선택된 클립들과 겹치지 않으면 True (greedy 겹침 억제)"""
+        return all(_clip_iou(cand, sel) <= settings.HIGHLIGHT_IOU_THRESHOLD for sel in chosen)
+
+    # 1) 활용: 점수 상위부터 겹침 억제하며 exploit_n개 선택
     result = []
+    for cand in all_highlights:
+        if len(result) >= exploit_n:
+            break
+        if _fits(cand, result):
+            result.append(cand)
+
+    # 2) 탐색: 미선택 + 점수 floor 이상 후보를 랜덤 추출해 max_shorts까지 채움
+    chosen_ids = {id(c) for c in result}
+    if explore_n > 0:
+        pool = [c for c in all_highlights
+                if id(c) not in chosen_ids
+                and c.get("hook_score", 0) >= settings.EXPLORATION_MIN_SCORE]
+        random.shuffle(pool)
+        for cand in pool:
+            if len(result) >= max_shorts:
+                break
+            if _fits(cand, result):
+                cand["is_exploration"] = True       # 탐색 픽 태깅 (재학습 다양성 추적)
+                result.append(cand)
+                chosen_ids.add(id(cand))
+
+    # 3) 탐색 후보 부족 시 활용 후보로 채워 출력 개수 유지
     for cand in all_highlights:
         if len(result) >= max_shorts:
             break
-        if any(_clip_iou(cand, sel) > settings.HIGHLIGHT_IOU_THRESHOLD for sel in result):
-            continue
-        result.append(cand)
+        if id(cand) not in chosen_ids and _fits(cand, result):
+            result.append(cand)
+            chosen_ids.add(id(cand))
 
-    logger.info(f"Phase 2 추론 완료: {len(all_highlights)}개 탐지 -> {len(result)}개 선택")
+    explore_picked = sum(1 for c in result if c.get("is_exploration"))
+    logger.info(
+        f"Phase 2 추론 완료: {len(all_highlights)}개 탐지 -> {len(result)}개 선택"
+        f"(활용 {len(result) - explore_picked} + 탐색 {explore_picked})"
+    )
 
     return result

@@ -1,8 +1,11 @@
 # 36일차: round2 OK율 측정 스크립트
+# 37일차: --exclude-exploration 옵션 추가 (Component F 탐색 픽을 OK율에서 제외)
 # OK율 = OK / (OK + 선택NO) - 경계NO / 편집NO 는 분모에서 제외
 # 사용:
-#   python3 measure_ok_rate.py          # 모든 model_version 출력
-#   python3 measure_ok_rate.py round2   # 특정 버전만 (부분 문자열 매칭)
+#   python3 measure_ok_rate.py                                  # 모든 model_version 출력
+#   python3 measure_ok_rate.py round2                           # 특정 버전만 (부분 문자열 매칭)
+#   python3 measure_ok_rate.py round3 --exclude-exploration     # 탐색 픽(is_exploration=1) 제외
+#   (--exclude-exploration 는 위치 무관, 단독 사용 시 전체 버전에 적용)
 
 import sqlite3
 import sys
@@ -13,12 +16,17 @@ DB_PATH = "data/shorts_ai.db"
 BASELINES = {"base": 41.0, "round1b": 50.3}
 ROUND1B = 50.3  # 핵심 비교 대상
 
-def fetch_counts(con):
-    """model_version 별 OK / 선택NO / 경계NO / 편집NO 집계"""
+def fetch_counts(con, exclude_exploration=False):
+    """model_version 별 OK / 선택NO / 경계NO / 편집NO 집계
+    exclude_exploration=True: 탐색 픽(is_exploration=1) 제외 - 의도적 저득점이라 OK율을 왜곡함.
+    (=1 만 제외하고 NULL/0 은 유지 -> 컬럼 추가 이전 구버전 행도 안전하게 포함)"""
     
+    where = "feedback IS NOT NULL"
+    if exclude_exploration:
+        where += " AND (is_exploration IS NULL OR is_exploration = 0)"
     rows = con.execute(
         "SELECT model_version, feedback, feedback_reason, COUNT(*) "
-        "FROM shorts WHERE feedback IS NOT NULL "
+        f"FROM shorts WHERE {where} "
         "GROUP BY model_version, feedback, feedback_reason"
     ).fetchall()
     data = {}
@@ -75,16 +83,23 @@ def report(mv, d):
         )
 
 def main():
-    target = sys.argv[1] if len(sys.argv) > 1 else None
+    # 37일차: --exclude-exploration 플래그 파싱(위치 무관), 나머지 positional = target 버전
+    raw = sys.argv[1:]
+    exclude_exploration = "--exclude-exploration" in raw
+    positional = [a for a in raw if not a.startswith("--")]
+    target = positional[0] if positional else None
     try:
         con = sqlite3.connect(DB_PATH)
     except sqlite3.Error as e:
         print(f"DB 연결 실패 ({DB_PATH}): {e}")
         return
     try:
-        data = fetch_counts(con)
+        data = fetch_counts(con, exclude_exploration=exclude_exploration)
     finally:
         con.close()
+
+    if exclude_exploration:
+        print("[모드] 탐색 픽(is_exploration=1) 제외 - 활용 픽만 집계")
 
     if not data:
         print("라벨된 쇼츠가 없습니다 (feedback IS NULL)")
