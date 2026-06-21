@@ -56,9 +56,14 @@ class VideoService:
 
         return project
     
-    async def download_video(self, project_id: str) -> Optional[Project]:
+    async def download_video(self, project_id: str, quality: int = 1080) -> Optional[Project]:
         """
         유투브 영상 다운로드 및 오디오 추출.
+
+        Args:
+            quality: 다운로드 최대 해상도(height). 기본 1080(발행용)
+                     38일차: 라벨링 단계는 480 전달 - 프레임이 336px로 추출되므로
+                     화질/학습 무영향, 다운로드량만 ~5배 절감   
 
         전체 흐름:
             1. 상태를 DOWNLOADING으로 변경
@@ -85,14 +90,17 @@ class VideoService:
 
             # - yt-dlp 로 영상 다운로드 -
 
+            # 38일차: quality 파라미터로 해상도 가변 (라벨링 480 / 발행 1080)
             # -f: 포맷 선택 (1080p 이하 MP4 영상 + M4A 오디오)
             # --merge-output-format mp4: 영상 + 오디오를 MP4로 합침
             # --no-playlist: 재생목록이면 단일 영상만 다운로드
+            # --concurrent-fragments 8: 38일차 - 프래그먼트 8개 병렬 다운로드 (속도 향상)
             cmd_video = [
                 "yt-dlp",
-                "-f", "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]",
+                "-f", f"bestvideo[height<={quality}][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}]",
                 "--merge-output-format", "mp4",
                 "--no-playlist",
+                "--concurrent-fragments", "8",
                 "-o", str(video_path),
                 str(project.youtube_url),
             ]

@@ -80,7 +80,8 @@ async def list_projects(
         items=[
             ProjectResponse(
                 **p.__dict__, 
-                shorts_count=len(getattr(p, "shorts", []))  # 쇼츠가 로드되지 않았다면 빈 리스트
+                # 36일차: getattr가 미로드 관계에 lazy load 유발(async->MissingGreenlet). __dict__로 로드 여부만 확인
+                shorts_count=len(p.__dict__["shorts"]) if "shorts" in p.__dict__ else 0
             )
             for p in items
         ],
@@ -112,16 +113,18 @@ async def get_project(
 @router.post("/{project_id}/download", response_model=ProjectResponse)
 async def download_video(
     project_id: str,
+    quality: int = 1080,        # 38일차: 라벨링 480 / 발행 1080 (해상도)
     video_svc: VideoService = Depends(get_video_service)
 ):
     """
     영상 다운로드 시작
 
-    POST /api/v1/projects/{id}/download
+    POST /api/v1/projects/{id}/download?quality=480
     서비스에서 yt-dlp 다운로드 -> FFmpeg 오디오 추출 -> 메타데이터 추출을 수행
+    38일차: quality 쿼리 파라미터로 해상도 지정 (기본 1080, 라벨링 480)
     """
     
-    project = await video_svc.download_video(project_id)
+    project = await video_svc.download_video(project_id, quality=quality)
 
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")

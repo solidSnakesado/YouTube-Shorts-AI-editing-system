@@ -114,6 +114,7 @@
         </select>
       </div>
       <button class="btn btn-primary" onclick="runAll()">▶ 전체 실행</button>
+      <button class="btn" onclick="runLabeling()" style="background:linear-gradient(135deg,#0ea5e9,#06b6d4);color:white" title="38일차: 1~4단계만 실행 (다운로드 480p + 리프레이밍/인코딩 생략). 라벨링 전용">🏷 라벨링 실행(1~4)</button>
       <button class="btn" onclick="runFinal()" style="background:linear-gradient(135deg,#10b981,#22c55e);color:white" title="피드백 있으면 OK만, 없으면 전체를 5→7로 최종 처리 (1~4 재실행 안 함, 라벨 보존)">✂ 최종 처리</button>
       <button class="btn btn-secondary" onclick="resetAll()">↺ 초기화</button>
     </div>
@@ -358,7 +359,7 @@ async function apiCall(url, opts={}) {
   finally { setLoading(false); }
 }
 
-async function runStep(id) {
+async function runStep(id, opts = {}) {                  // 38일차: opts.quality (step2 다운로드 해상도)
   if (id === 1) {
     const url = document.getElementById("urlInput").value.trim();
     if (!url) { showError("유튜브 URL을 입력하세요"); return; }
@@ -370,7 +371,9 @@ async function runStep(id) {
     addLog(`[Step ${id}] ${STEPS[id-1].label} 실행 중...`);
     const td = document.getElementById("targetDuration").value.trim();
     const tdParam = (id === 4 && td) ? `&target_duration_sec=${td}` : "";
-    const suffix = id === 4 ? `?max_shorts=${document.getElementById("maxShorts").value}${tdParam}` : "";
+    let suffix = id === 4 ? `?max_shorts=${document.getElementById("maxShorts").value}${tdParam}` : "";
+    // 38일차: 라벨링 모드면 다운로드(step2)를 저해상도로 (발행은 기본 1080)
+    if (id === 2 && opts.quality) { suffix = `?quality=${opts.quality}`; addLog(`  다운로드 해상도: ${opts.quality}p (라벨링 모드)`, "info"); }
     if (id === 4 && td) addLog(`  쇼츠 길이: ${td}초 (사용자 지정)`, "info");
     const d = await apiCall(`${API}/projects/${state.projectId}/${STEPS[id-1].ep}${suffix}`, { method:"POST" });
     if (d) {
@@ -417,6 +420,13 @@ async function runAll() {
     for (let i = 5; i <= 7; i++) { if (STEPS[i-1].skip) { addLog(`[Step ${i}] ${STEPS[i-1].label} — 건너뜀`, "info"); continue; } await runStep(i); if (document.getElementById("errorBar").style.display !== "none") return; }
   }
   addLog(`\n✅ 전체 완료! ${state.shorts.length}개 쇼츠 생성`, "success");
+}
+
+// 38일차: 라벨링 실행 — 1~4단계만 (리프레이밍/인코딩 생략). 다운로드는 480p.
+// 쇼츠 선택만 확인하면 되므로 발행용 렌더링(5~7) 불필요 → 영상당 ~4분 + outputs/ 누적 절약.
+async function runLabeling() {
+  for (let i = 1; i <= 4; i++) { await runStep(i, { quality: 480 }); if (document.getElementById("errorBar").style.display !== "none") return; }
+  addLog(`\n🏷 라벨링 준비 완료 (1~4단계, 480p) — 각 쇼츠에 👍/👎 라벨링하세요`, "success");
 }
 
 // 36일차: 최종 처리 — 1~4 재실행 없이 5→7만 수행. 피드백 있으면 OK만, 없으면 전체. (라벨 보존)
