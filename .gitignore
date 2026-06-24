@@ -91,3 +91,16 @@ runs/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# --- 학습 데이터셋 (생성물 — 빌더로 재생성, 대용량 6.6GB) ---
+# datasets/ = jsonl + frames(~13만 jpg) + audio
+datasets/
+# 프레임/썸네일 이미지
+*.jpg
+*.jpeg
+*.png
+*.webp
+# 데이터 압축본 (Colab 업로드용 tar)
+*.tar
+*.tar.gz
+*.zip
