@@ -91,3 +91,19 @@ runs/
 .pytest_cache/
 htmlcov/
 .coverage
+# === 생성 데이터/모델 (Git 제외 — 빌더로 재생성, 대용량) ===
+# datasets/ = 학습 데이터 6.6GB, models/ = LoRA 어댑터
+# data/heatmaps/ = 데이터셋 seed -> Drive 별도 백업 필수
+datasets/
+models/
+data/heatmaps/
+*.tar
+*.zip
+
+# === Python ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log

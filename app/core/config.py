@@ -42,6 +42,7 @@ class Settings(BaseSettings):
         env_file=".env",                # 프로젝트 루트의 .env 파일에서 값을 읽음
         env_file_encoding="utf-8",      # 한글이 포함된 값도 정상 처리
         case_sensitive=True,            # 환경 변수명의 대소문자를 구분 (APP_NAME과 app_name 을 구분)
+        extra="ignore",                 # 39일차: GEMMA_* 등 미지정 키 무시 (gemma_config가 별도 소비, 공종)
     )
 
     # --------------------------------------------------------------
