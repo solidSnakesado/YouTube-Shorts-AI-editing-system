@@ -99,6 +99,8 @@ models/
 data/heatmaps/
 *.tar
 *.zip
+*.tar.gz
+unsloth_compiled_cache/
 
 # === Python ===
 __pycache__/
