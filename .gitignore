@@ -104,3 +104,6 @@ datasets/
 *.tar
 *.tar.gz
 *.zip
+
+# --- Unsloth 컴파일 캐시 (자동 생성, 매 실행 변경) ---
+unsloth_compiled_cache/
