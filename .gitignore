@@ -109,3 +109,6 @@ __pycache__/
 venv/
 .env
 *.log
+
+_mem_check.py
+llama.cpp
