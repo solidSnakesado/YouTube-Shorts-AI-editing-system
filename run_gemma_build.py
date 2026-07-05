@@ -23,6 +23,7 @@ async def _run(args: argparse.Namespace) -> None:
         output_dir=Path(args.output_dir) if args.output_dir else None,
         min_peak_count=args.min_peak_count,
         max_videos=args.max_videos,
+        delay=args.delay,
     )
     started = time.monotonic()
     output_path = await builder.build()
@@ -53,6 +54,10 @@ def main() -> None:
     parser.add_argument(
         "--output-dir", default=None,
         help="출력 루트 (기본: datasets/gemma_audio)",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=0.0,
+        help="영상 간 대기(초) - 403 rate limit 방어. 권장 3~5",
     )
     args = parser.parse_args()
     asyncio.run(_run(args))

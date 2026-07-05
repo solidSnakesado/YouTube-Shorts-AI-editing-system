@@ -6,9 +6,13 @@
 # 39일차 신규: 풀영상 다운로드 병목(롱플레이 수 시간) 해소 -> 피크별 구간만 다운로드(--download-sections).
 #   - 구간 파일은 0초 시작 -> 추출은 상대(0-base) 시각, 메타/출력 레이블은 절대 시각(원본 영상 위치) 유지
 #   - 피크별 다운로드 실패를 peak_dl_fails로 가시화 (조용한 누락 방지, 피크별 실패 격리)
+# 45일차 수정(1회): 영상 간 delay 추가(403 rate limit 방어). 빠른 연속 요청 -> YouTube IP 일시차단(403)
+#   -> 90초 대기 후 동일 영상 성공 확인됨(=rate limit). 다운로드한 영상 뒤에만 sleep(스킵은 즉시 진행).
+#   변경: __init__ delay 인자 + 루프 sleep. run_gemma_build에 --delay 인자. 변경 라인은 전달 메시지 참조.
 
 """Gemma 오디오 피벗 데이터셋 빌더 - 히트맵 -> [1fps 프레임 + 30s 오디오] -> messages JSONL"""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Optional
@@ -31,6 +35,7 @@ class GemmaDatasetBuilder:
         output_dir: Optional[Path] = None,
         min_peak_count: int = 2,
         max_videos: Optional[int] = None,
+        delay: float = 0.0,
     ):
         self.heatmap_path = Path(heatmap_path)
         # 출력 루트 기본값: datasets/gemma_audio (config 추가 없이 파라미터로 제어)
@@ -41,6 +46,7 @@ class GemmaDatasetBuilder:
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.min_peak_count = min_peak_count
         self.max_videos = max_videos
+        self.delay = delay                              # 45일차: 영상 간 대기(초), 403 rate limit 방어
         self._stats = {
             "total_videos": 0, "filtered_videos": 0, "processed": 0,
             "skipped": 0, "samples": 0, "no_audio_skips": 0, "peak_dl_fails": 0,
@@ -76,6 +82,8 @@ class GemmaDatasetBuilder:
             except Exception as e:
                 logger.error(f"[{idx}/{len(videos)}] 실패: {vid} | {e}")
                 self._stats["skipped"] += 1
+            if self.delay > 0:                          # 45일차: 실제 요청 후에만 대기(403 방어)
+                await asyncio.sleep(self.delay)
         logger.info(
             f"Gemma 데이터셋 빌드 완료 | 처리 {self._stats['processed']}, 스킵 {self._stats['skipped']} | "
             f"샘플 {self._stats['samples']}개, 오디오없음 스킵 {self._stats['no_audio_skips']}개, "

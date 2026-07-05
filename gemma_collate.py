@@ -1,6 +1,8 @@
 # 역할: Gemma 3N 멀티모달을 SFC용 collate_fn - all.jsonl 1행([프레임 N + 오디오 + 텍스트])을
 #       프로세서 입력 배치로 변환. Colab(A100) 학습 루프의 data_collator로 주입.
 # 41일차 신규: Unsloth Gemma3N audio-only collate를 [프레임+오디오] 멀티모달로 교체하는 골격
+# 50일차 수정(1회): load_audio에 pad_to_sec(기본 30.0) 무음 패딩 추가 — 수정본 기준 L78~104.
+#   비표준 길이(30s 미만) 클립의 오디오 특징↔토큰 수 불일치 방지 (학습·추론 공용 함수라 정합 자동 유지)
 #   - 결정적 부분(경로추출/프레임샘플링)은 로컬 ast/pyflakes + 모의 시뮬로 검증 완료
 #   - 미디어 로드(PIL/soundfile)는 지연 import (로컬 미설치 통과, Colab 설치본 사용)
 #   - processor 실호출부(COLAB)는 Gemma 3N 프로세서 실동작 의존 -> Colab CPU 스모크로 확정
@@ -75,9 +77,17 @@ def load_images(frame_paths: list[str], base_dir: Optional[str] = None):
         imgs.append(Image.open(fp).convert("RGB"))
     return imgs
 
-def load_audio(audio_path: str, target_sr: int = 16000, base_dir: Optional[str] = None):
-    """오디오 경로 -> (mono float32 array, sr). target_sr로 리샘플(librosa 가용 시)."""
-    
+def load_audio(audio_path: str, target_sr: int = 16000, base_dir: Optional[str] = None,
+               pad_to_sec: Optional[float] = 30.0):
+    """오디오 경로 -> (mono float32 array, sr). target_sr로 리샘플(librosa 가용 시).
+
+    50일차: pad_to_sec 지정 시 그 길이까지 뒤쪽 무음(0) 패딩.
+      비표준 길이(30s 미만) 클립에서 오디오 특징 프레임 수 ↔ 텍스트 오디오
+      자리표시 토큰 수 불일치("Audio features and audio tokens do not match")를
+      방지. 30s 이상은 그대로(자르지 않음 — 프로세서가 처리). None이면 패딩 비활성.
+    """
+
+    import numpy as np       # 50일차: 무음 패딩용
     import soundfile as sf  # COLAB 설치본
     fp = Path(base_dir) / audio_path if base_dir else Path(audio_path)
     wav, sr = sf.read(str(fp), dtype="float32")
@@ -90,6 +100,10 @@ def load_audio(audio_path: str, target_sr: int = 16000, base_dir: Optional[str] 
             sr = target_sr
         except Exception:
             pass            # 리샘플 불가 시 원본 SR 유지 (프로세서가 처리)
+    if pad_to_sec is not None:                          # 50일차: 뒤쪽 무음 패딩
+        need = int(round(pad_to_sec * sr))
+        if wav.shape[0] < need:
+            wav = np.concatenate([wav, np.zeros(need - wav.shape[0], dtype=wav.dtype)])
     return wav, sr
 
 # --------------------------------------------------------------

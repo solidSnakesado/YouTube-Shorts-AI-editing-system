@@ -4,6 +4,9 @@
 # 39일차 신규: Gemma 네거티브(비피크) 데이터셋 빌드 진입점. 빌더에 __main__ 없어 별도 러너.
 #   - 반드시 포지티브 빌드(run_gemma_build.py) 후 실행 (dataset.jsonl의 영상당 수에 1:1 맞춤)
 #   - 소요 시간/영상당 평균 출력 -> 전체 빌드 시간 외삽용
+# 46일차 수정(1회): --delay 인자 추가(영상 간 sleep, 403 rate limit 방어). pos 러너와 동일 패턴.
+#   neg 빌더가 같은 download_video_section을 쓰므로 동일한 rate limit 위험 -> delay 일관 적용.
+#   변경: 생성자 delay 전달(L30), --delay 인자 정의(L80-83).
 
 """Gemma 네거티브 빌더 CLI 러너 - 비피크 구간 빈 하이라이트 샘플 생성 (포지티브와 1:1)"""
 
@@ -24,6 +27,7 @@ async def _run(args: argparse.Namespace) -> None:
         heatmap_path=Path(args.heatmap),
         output_dir=Path(args.output_dir) if args.output_dir else None,
         max_videos=args.max_videos,
+        delay=args.delay,                               # 46일차: 403 rate limit 방어(영상 간 sleep)
     )
     started = time.monotonic()
     output_path = await builder.build_negatives(
@@ -72,6 +76,10 @@ def main() -> None:
     parser.add_argument(
         "--seed", type=int, default=42,
         help="비피크 윈도우 랜덤 선택 시드 (재현성)",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=0.0,
+        help="영상 간 대기(초) - 403 rate limit 방어. 권장 3~5",
     )
     args = parser.parse_args()
     asyncio.run(_run(args))

@@ -1,4 +1,19 @@
-# 44일차 수정 | 배치: ~/project/yt_shorts_ai/gemma_retrain.py
+# 46일차 수정(1회) | 배치: ~/project/yt_shorts_ai/gemma_retrain.py
+# [수정 1회·46일차] C(설정 비교): Qwen(붕괴없음)과 학습설정 일치. round9(JSON+graded)도
+#   step300 붕괴 -> 라벨/형식 아닌 학습설정 차이 의심. Qwen train_qlora 대비 Gemma는
+#   (a)MLP까지 LoRA (b)alpha/r=1 (c)rslora없음 (d)weight_decay0 (e)linear스케줄러 였음.
+#   변경: finetune_mlp_modules False(attention만) · lora_alpha=rank*2 · use_rslora True
+#   · weight_decay 0.01 · lr_scheduler cosine · rank기본8 · epochs기본3. Qwen과 전 변수
+#   일치 -> 그래도 붕괴면 모델(E4B) 차이 확정. 변경 라인 아래 전달 메시지 참조.
+#
+# 45일차 수정(1회): --dropout 인자(기본 0). 이하 원본 이력:
+# [수정 1회·45일차] --dropout 인자 추가(기본 0=기존동작 유지). 사유: B 검증 - round4가
+#   step100서 건강한 분리(+0.44) 후 step200/300 붕괴 = 작은데이터 과적합 패턴. lora_dropout으로
+#   과적합 억제해 초기 분리가 유지되는지 확인. 변경: build_model 시그니처+L(get_peft_model
+#   lora_dropout)+인자+호출. 변경 라인 아래 전달 메시지 참조. ⚠️ dropout>0 시 Unsloth full
+#   패치와 충돌 가능 - 학습 시작 직후 배너/trainable params 정상인지 확인할 것.
+#
+# 44일차 수정 | 이하 원본 이력:
 # 수정3(안정화): L106~107 --save-limit 인자 · L158 save_total_limit 인자화(save_steps 작게 시 초반 best 보존).
 # 수정 라인(본 파일 기준): L111 import(trl->transformers) · L140~161 config 블록
 #   (SFTConfig->TrainingArguments · 주석추가 · warmup_steps · dataset_kwargs 삭제) · L163~170 trainer(SFTTrainer->Trainer)
@@ -60,12 +75,13 @@ def latest_checkpoint(output_dir: str) -> Optional[str]:
     return os.path.join(output_dir, latest)
 
 
-def build_model(rank: int):
+def build_model(rank: int, dropout: float = 0.0):
     """베이스(bf16) 로드 + LoRA 부착 -> (model, processor).
 
     vision 동결 + language LoRA만(1차와 동일, gemma_unsloth_check에서 검증된 인자).
     use_gradient_checkpointing="unsloth"로 KV공유 발산 회피. 부착 후 출력되는
     trainable params가 language-only 규모인지 확인할 것(audio까지 잡히면 VRAM 급증).
+    45일차: dropout>0(B 검증)은 과적합 억제용. Unsloth 충돌 시 배너/params 이상으로 드러남.
     """
     from unsloth import FastModel
 
@@ -81,9 +97,11 @@ def build_model(rank: int):
         finetune_vision_layers=False,           # vision/audio 동결
         finetune_language_layers=True,
         finetune_attention_modules=True,
-        finetune_mlp_modules=True,
-        r=rank, lora_alpha=rank, lora_dropout=0,
+        finetune_mlp_modules=False,             # 46일차: Qwen과 동일 attention-only(MLP 끔)
+        r=rank, lora_alpha=rank * 2,            # 46일차: Qwen과 동일 alpha/r=2
+        lora_dropout=dropout,
         bias="none", random_state=3407,
+        use_rslora=True,                        # 46일차: Qwen과 동일 rslora(학습 안정화)
         use_gradient_checkpointing="unsloth",   # KV공유 발산 방지(Unsloth 권장)
     )
     return model, processor
@@ -97,11 +115,13 @@ def main() -> None:
                     default="/content/drive/MyDrive/gemma4_adapters/round2_ckpt",
                     help="Drive 경로 권장 - 런타임 죽어도 체크포인트 생존")
     ap.add_argument("--base-dir", default=None, help="미디어 상대경로 기준(보통 None=cwd)")
-    ap.add_argument("--rank", type=int, default=16, help="LoRA rank(붕괴 시 32 검토)")
+    ap.add_argument("--rank", type=int, default=8, help="LoRA rank(46일차: Qwen과 동일 8)")
+    ap.add_argument("--dropout", type=float, default=0.0,
+                    help="LoRA dropout(B 검증: 과적합 억제 0.1~0.15, 0=기존동작)")
     ap.add_argument("--lr", type=float, default=2e-4, help="학습률(붕괴 시 1e-4 검토)")
     ap.add_argument("--batch", type=int, default=2, help="per-device 배치(1차=1, 보수적 2부터)")
     ap.add_argument("--accum", type=int, default=4, help="누적(batch2*accum4=유효8, 1차와 동일)")
-    ap.add_argument("--epochs", type=float, default=2.0, help="에폭(1차=2)")
+    ap.add_argument("--epochs", type=float, default=3.0, help="에폭(46일차: Qwen과 동일 3)")
     ap.add_argument("--save-steps", type=int, default=100, help="체크포인트 주기(조기 검증 시 50)")
     ap.add_argument("--save-limit", type=int, default=3,
                     help="44일차: checkpoint 보존 개수(save_steps 작게 시 초반 best 보존 위해 늘림)")
@@ -127,7 +147,7 @@ def main() -> None:
     eval_ds = Dataset.from_dict(
         {"sample": [json.dumps(r, ensure_ascii=False) for r in eval_rows]})
 
-    model, processor = build_model(args.rank)
+    model, processor = build_model(args.rank, args.dropout)
 
     # 44일차: 검증된 학습 collate 재사용. 래퍼가 JSON 문자열을 행 dict로 복원해 전달.
     base_collate = build_collate_fn(
@@ -150,7 +170,9 @@ def main() -> None:
         gradient_accumulation_steps=args.accum,
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
-        warmup_steps=30,                        # 44일차 수정: warmup_ratio deprecated -> steps
+        lr_scheduler_type="cosine",             # 46일차: Qwen과 동일 cosine
+        warmup_ratio=0.1,                       # 46일차: Qwen과 동일 warmup_ratio 0.1
+        weight_decay=0.01,                      # 46일차: Qwen과 동일 L2 정규화(붕괴 방지 핵심)
         bf16=True,
         logging_steps=10,
         save_strategy="steps",

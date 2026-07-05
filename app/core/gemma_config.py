@@ -1,6 +1,7 @@
 # 계층: 설정 계층 (Pydantic Settings)
 # 역할: Gemma 4 E4B 오디오 피벗 전용 설정 - 기존 config.Settings(Qwen)와 격리
 # 39일차 신규: Qwen 유지 + Gemma 추가(모델 셀렉터) 토대. config.py 무수정
+# 50일차 수정 1회: GEMMA_INFER_ADAPTER_DIR 신설 (수정본 기준 L40~42) — e2e 회귀 어댑터 경로
 #   - 동일 .env를 읽되 GEMMA_* 키만 사용(extra=ignore) -> 기존 Settings와 충돌 없음
 #   - 데이터 재구축(1fps 프레임 + 30s 오디오) + 추론 셀렉터(베이스/어댑터/활성) 공통 토대
 
@@ -36,6 +37,9 @@ class GemmaSettings(BaseSettings):
     GEMMA_GENERATOR_DIR: str = "./models/lora/gemma_generator"
     # True면 셀렉터에 Gemma 노출. 어댑터 학습 완료 후 .env에서 활성화
     GEMMA_ENABLED: bool = False
+    # 50일차: e2e 회귀 추론 어댑터 (round12 final = round12_m1). GEMMA_ENABLED=true 시
+    #   vlm_client가 이 경로로 gemma_phase_inference를 실행 (Qwen 경로보다 우선)
+    GEMMA_INFER_ADAPTER_DIR: str = "./models/lora/gemma4/round12_final/final"
 
     # --------------------------------------------------------------
     # 데이터 상한 (39일차) - 피벗 스펙: [1fps 프레임 + 30s 오디오, 정렬]

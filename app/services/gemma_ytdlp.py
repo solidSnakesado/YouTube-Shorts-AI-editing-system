@@ -6,6 +6,10 @@
 # 39일차: 롱플레이(수 시간) 풀다운로드 병목 해소 위해 구간 다운로드 추가.
 #   - 7시간 영상에서 ~2분치 클립만 받도록 -> 다운로드 수십~100배 단축
 #   - --download-sections + --force-keyframes-at-cuts: 정확 컷 + 출력 0초 시작 -> 상대 타임스탬프 추출
+# 45일차 수정(1회): 두 명령에 --extractor-args "youtube:player_client=web" 추가. 사유: yt-dlp
+#   기본 TVHTML5 client의 스트림 URL을 ffmpeg(--download-sections 내부)가 요청하면 403.
+#   메타조회(--list-formats)는 되나 구간 다운로드만 실패하던 원인. web client URL은 ffmpeg
+#   요청이 쿠키와 함께 통과(동일 영상·구간 단일테스트로 성공 확인). 변경 라인 전달 메시지 참조.
 
 """Gemma 데이터 재구축용 yt-dlp 다운로드 헬퍼 (풀영상 / 피크 구간 두 모드)"""
 
@@ -70,6 +74,8 @@ async def download_video_with_audio(
         "-o", str(output_path), "--no-playlist",
         "--socket-timeout", str(socket_timeout),
         "--no-warnings", "--js-runtimes", "node",   # yt-dlp JS 챌린지 대응 (node 필요)
+        # 45일차: web client URL로 받아야 ffmpeg 구간요청 403 회피(TVHTML5 URL은 ffmpeg서 403)
+        "--extractor-args", "youtube:player_client=web",
         *_cookie_opts(), url,
     ]
     logger.info(f"Gemma 영상 다운로드 시작 (오디오 포함): {video_id}")
@@ -120,6 +126,8 @@ async def download_video_section(
         "-o", str(output_path), "--no-playlist",
         "--socket-timeout", str(socket_timeout),
         "--no-warnings", "--js-runtimes", "node",
+        # 45일차: web client URL로 받아야 ffmpeg 구간요청 403 회피(핵심 - 구간 다운로드 실패 원인)
+        "--extractor-args", "youtube:player_client=web",
         *_cookie_opts(), url,
     ]
     logger.info(f"Gemma 구간 다운로드 시작: {video_id} | {start_sec:.0f}~{end_sec:.0f}초")

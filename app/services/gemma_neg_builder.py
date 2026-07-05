@@ -1,15 +1,19 @@
 # 계층: 비즈니스 로직 계층 (Service 헬퍼)
 # 역할: 히트맵 비피크 구간 -> 30s 구간 다운로드 -> [1fps 프레임 + 오디오] -> 빈 하이라이트(네거티브) 샘플 생성
 #       Gemma 4 E4B 오디오 피벗 데이터 재구축 - 모듈 C-3 (네거티브 빌더)
-# 의존: gemma_dataset_builder.GemmaDatasetBuilder(상속: 경로/추출/저장/정규화 재사용),
+# 의존: gemma_dataset_builder.GemmaDatasetBuilder(상속: 경로/추출/저장/정규화 재사용)
 #       gemma_ytdlp.download_video_section(C-1), gemma_sample(C-2a 공유 상수), dataset_utils, gemma_config
-# 39일차 신규: all-positive 문제 해소 -> 비피크 구간을 빈 하이라이트로 학습(빈 출력 + 오디오 기반 판별 강제).
+# 39일차 신규: all-positive 문제 해소 -> 비피크 구간을 빈 하이라이트로 학습(빈 출력 + 오디오 기반 판별 강제)
 #   - 포지티브 수에 맞춰 1:1 (영상당 포지티브 샘플 수만큼 네거티브 생성)
 #   - 별도 파일(dataset_neg.jsonl) + 독립 재개 -> 포지티브 빌드와 무관하게 이어서 진행
 #   - 파일명은 neg_id(f"{vid}_neg")로 격리 -> 포지티브 프레임/오디오와 충돌 방지
+# 46일차 수정(1회): 영상 간 delay(self.delay) 적용 -> 403 rate limit 방어. pos 빌더와 동일 패턴.
+#   상속한 GemmaDatasetBuilder.__init__의 delay를 build_negatives 루프에서 sleep으로 소비.
+#   변경: import asyncio(L16), 루프 말미 sleep(L77-78). 실제 다운로드한 영상에만 대기.
 
 """Gemma 네거티브 빌더 - 비피크 30s 구간에서 빈 하이라이트 샘플 생성 (포지티브와 1:1)"""
 
+import asyncio
 import json
 import random
 from pathlib import Path
@@ -70,6 +74,8 @@ class GemmaNegBuilder(GemmaDatasetBuilder):
             except Exception as e:
                 logger.error(f"[{idx}/{len(videos)}] 실패: {vid} | {e}")
                 self._stats["skipped"] += 1
+            if self.delay > 0:                          # 46일차: 영상 간 대기(403 방어, pos 빌더와 동일)
+                await asyncio.sleep(self.delay)
         logger.info(
             f"Gemma 네거티브 빌드 완료 | 처리 {self._stats['processed']}, 스킵 {self._stats['skipped']} | "
             f"샘플 {self._stats['samples']}개, 오디오없음 스킵 {self._stats['no_audio_skips']}개, "
@@ -163,7 +169,7 @@ class GemmaNegBuilder(GemmaDatasetBuilder):
     @staticmethod
     def _count_pos_per_video(pos_path: Path) -> dict:
         """포지티브 JSONL에서 영상당 샘플 수 집계 (metadata.video_id 기준, 네거티브 마커 제외)"""
- 
+
         counts: dict = {}
         if not pos_path.is_file():
             return counts

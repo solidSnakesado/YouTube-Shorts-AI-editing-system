@@ -2,6 +2,9 @@
 # 계층: 패키징 유틸 (루트 실행 스크립트)
 # 역할: 포지티브+네거티브 병합 -> 시드 셔플 -> 학습용 단일 jsonl + 검증
 # 39일차 신규: dataset.jsonl + dataset_neg.jsonl -> all.jsonl (Colab 업로드용)
+# 51일차 수정 1회: 피드백 jsonl 병합 지원 (--feedback-path / --feedback-upsample)
+#   - 피드백은 train에만 병합 (eval은 v2 전용 유지 -> Spearman을 round12 0.2671과 직접 비교)
+#   - 누수 검사: 피드백 metadata.yt_id가 eval 영상(YouTube ID)과 겹치면 해당 샘플 제외
 #   - 셔플 필수: 블록 배치(전부 pos 후 전부 neg)면 배치 불균형 -> 시드 셔플로 교차
 #   - 검증: 총행수 = pos+neg, pos/neg 분포, 최대 동일라벨 연속(셔플 품질), 파싱오류
 #   - 비파괴: 원본 2개 보존, --out에만 기록. 시드 고정(--seed)으로 재현 가능
@@ -127,6 +130,11 @@ def _parse_args():
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED, help="셔플 시드(재현용)")
     ap.add_argument("--eval-ratio", type=float, default=0.2,
                     help="영상 단위 eval 분리 비율(0이면 분리 안 함). 기본 0.2")
+    # 51일차 수정 1회: 피드백 병합 옵션 (train 전용)
+    ap.add_argument("--feedback-path", default=None,
+                    help="피드백 jsonl (지정 시 train에만 병합, eval은 v2 전용 유지)")
+    ap.add_argument("--feedback-upsample", type=int, default=1,
+                    help="피드백 업샘플 배수 (35일차 교훈: 과업샘플=평균회귀, 2~3 권장)")
     return ap.parse_args()
 
 
@@ -141,16 +149,47 @@ def main() -> int:
     pos_rows, pos_err = load_jsonl(pos_path)
     neg_rows, neg_err = load_jsonl(neg_path)
     merged = pos_rows + neg_rows
+
+    # 51일차 수정 1회: 피드백 로드 (split은 base(merged)만 대상, 피드백은 train 전용)
+    fb_rows, fb_err = [], []
+    if args.feedback_path:
+        fb_path = Path(args.feedback_path)
+        if not fb_path.exists():
+            print(f"파일 없음: {fb_path}")
+            return 1
+        fb_rows, fb_err = load_jsonl(fb_path)
+
     random.seed(args.seed)
     random.shuffle(merged)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(out_path, merged)
+    _write_jsonl(out_path, merged + fb_rows)    # 51일차: all.jsonl은 전체 보존용
 
     # 43일차: 영상 단위 stratified split (클립 누수 방지). eval_ratio>0 일 때만.
     split_ok = True
     if args.eval_ratio > 0:
         train_rows, eval_rows, sinfo = video_level_split(merged, args.eval_ratio, args.seed)
+
+        # 51일차 수정 1회: 피드백 -> train 전용 병합 + eval 영상 누수 검사
+        fb_leak = 0
+        if fb_rows:
+            eval_vids = {video_id_of(s) for s in eval_rows}
+            kept = []
+            for s in fb_rows:
+                yt = str(s.get("metadata", {}).get("yt_id", ""))
+                if yt and yt in eval_vids:
+                    fb_leak += 1        # eval에 같은 영상 존재 -> train 주입 시 누수
+                    continue
+                kept.append(s)
+            rng = random.Random(args.seed)
+            train_rows = train_rows + kept * max(1, args.feedback_upsample)
+            rng.shuffle(train_rows)
+            print("=== 피드백 병합 (train 전용) ===")
+            print(f"피드백 {len(fb_rows)}행 (파싱오류 {len(fb_err)}) x{max(1, args.feedback_upsample)} "
+                  f"-> train 주입 {len(kept) * max(1, args.feedback_upsample)}행 "
+                  f"| 누수 제외 {fb_leak}행")
+            print()
+
         train_path = out_path.parent / "train.jsonl"
         eval_path = out_path.parent / "eval.jsonl"
         _write_jsonl(train_path, train_rows)
@@ -160,7 +199,8 @@ def main() -> int:
         print("=== 영상 단위 split (누수 방지) ===")
         print(f"총 영상 {sinfo['videos']} -> eval 영상 {sinfo['eval_videos']}")
         print(f"train: {train_path} | {len(train_rows)}행 "
-              f"(pos {sinfo['train']['pos']} / neg {sinfo['train']['neg']})")
+              f"(base pos {sinfo['train']['pos']} / neg {sinfo['train']['neg']}"
+              f"{' + 피드백' if fb_rows else ''})")
         print(f"eval : {eval_path} | {len(eval_rows)}행 "
               f"(pos {sinfo['eval']['pos']} / neg {sinfo['eval']['neg']}) "
               f"= 실제 {e_ratio*100:.1f}%")
@@ -169,6 +209,10 @@ def main() -> int:
             print(f"⚠️ 영상 누수 발견: {len(sinfo['overlap'])}개 train/eval 양쪽 -> 분리 실패")
         else:
             print("영상 누수: 0 (train/eval 영상 겹침 없음) ✓")
+        print()
+    elif fb_rows:
+        # 51일차 수정 1회: split 미사용 시 피드백은 all.jsonl에만 포함됨을 명시
+        print("⚠️ --eval-ratio 0: 피드백은 all.jsonl에만 병합됨 (train.jsonl 미생성)")
         print()
 
     # 검증
@@ -180,14 +224,15 @@ def main() -> int:
     print("=== 데이터 패키징 (병합·셔플) ===")
     print(f"포지티브: {len(pos_rows)} (파싱오류 {len(pos_err)}) | "
           f"네거티브: {len(neg_rows)} (파싱오류 {len(neg_err)})")
-    print(f"출력: {out_path} | 총 {len(merged)}행 (시드 {args.seed})")
+    print(f"출력: {out_path} | 총 {len(merged) + len(fb_rows)}행 (시드 {args.seed})")  # 51일차: 피드백 포함 실제 행수
     print(f"\n[분포] 포지티브 {kinds['pos']} | 네거티브 {kinds['neg']} | 불량 {kinds['bad']}")
     print(f"[셔플 품질] 최대 동일라벨 연속: {run} "
           f"({'양호' if run < 20 else '주의: 블록 의심'})")
     print(f"[앞 30개 라벨] {head}")
 
     integrity = (len(merged) == len(pos_rows) + len(neg_rows)
-                 and kinds["bad"] == 0 and not pos_err and not neg_err and split_ok)
+                 and kinds["bad"] == 0 and not pos_err and not neg_err
+                 and not fb_err and split_ok)      # 51일차: 피드백 파싱오류 포함
     print("\n=== 종합: " + ("패키징 완료 (Colab 업로드 준비)" if integrity
                           else "문제 발견 (위 항목 확인)") + " ===")
     return 0 if integrity else 1
