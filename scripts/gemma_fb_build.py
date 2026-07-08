@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-51일차: Gemma 피드백 -> 학습 JSONL 빌더 (B-2 상대 너지 ±0.15)
+51일차: Gemma 피드백 -> 학습 JSONL 빌더 (B-2 상대 너지 ±0.15 + 53일차 상단 선형 압축)
 
 [스크립트 정보]
-- 구분: 신규 (전체 신규)
+- 구분: 수정 4회째
 - 레포 경로: scripts/gemma_fb_build.py
-- 수정 이력: 1차 작성 (51일차) -> 수정 1회(51일차): yt_id 메타 추가 (수정본 기준 L31, L61~L68, L74~L78, L199~L200) -> 수정 2회(51일차): 경로 상대화 _rel 추가·적용 (수정본 기준 L115~L124, L135~L136)
+- 수정 이력: 1차 작성 (51일차) -> 수정 1회(51일차): yt_id 메타 추가 -> 수정 2회(51일차):
+  경로 상대화 _rel 추가·적용 -> 수정 3회(52일차): --model-filter 인자화 + 기본 출력 r2
+  -> 수정 4회(53일차): B안 상단 선형 압축 도입 — 1.000 클램프 원자화 해소
+  (수정본 기준 L3, L6, L8~10, L15~19, L55~56, L90~106, L162~166)
 
 [핵심 규칙 — 34일차 B-2 상대 너지 (round4~11 재붕괴 교훈으로 필수)]
 - OK -> 원래 예측(hook_score) + 0.15 / NO(selection) -> 원래 예측 − 0.15, [0,1] 클램프
 - 고정 0.9/0.1 금지: 윈도우별 원점수가 달라 타깃 연속 분포 유지 -> 이진 붕괴 방지
+- 53일차 B안 상단 압축: OK의 raw(base+Δ)가 0.9 초과 시 [0.9, 1.15] -> [0.9, 1.0] 선형 재배치
+  (기울기 0.4). 0.9 이하 대역은 기존 B-2와 완전 동일 — 52일차 실측(r2의 39%가 타겟 1.000
+  원자화 -> 예측 상단 포화 67%)에 근거한 국소 수정. NO 하단은 미관측 문제라 규칙 불변
 - NO 사유 boundary/editing은 기본 제외 (구간 선택은 옳았음 -> 선택 신호 오염 방지,
   Qwen build_feedback_dataset.py와 동일 규칙. --include-nonselection-no로 포함 가능)
 
@@ -19,11 +25,11 @@
 2. 그 외(정상 18건) -> 저장된 경로 실존 검증 후 그대로 사용, 실패 시 재구축 경로 폴백
 
 [출력]
-- datasets/gemma_audio/dataset_feedback_r1.jsonl (v2 학습 스키마와 동일: messages+metadata)
+- 기본 datasets/gemma_audio/dataset_feedback_r2.jsonl (52일차 기본, --output으로 변경 가능)
 - metadata.video_id = "<project_id>_source" -> package_dataset의 video-level split 그대로 호환
 
 [실행]
-  python3 scripts/gemma_fb_build.py
+  python3 scripts/gemma_fb_build.py --model-filter round14_fb1
 """
 
 import argparse
@@ -44,16 +50,18 @@ from app.services.gemma_sample import (
 
 DB_PATH = Path("data/shorts_ai.db")
 MEDIA_ROOT = Path("data/feedback_media_gemma")
-DEFAULT_OUT = "datasets/gemma_audio/dataset_feedback_r1.jsonl"
+DEFAULT_OUT = "datasets/gemma_audio/dataset_feedback_r2.jsonl"    # 52일차: 기본 r2
 
 NUDGE_DELTA = 0.15                              # 34일차 B-2 확정값
+_COMPRESS_KNEE = 0.9                            # 53일차: 상단 압축 시작점 (raw 기준)
+_COMPRESS_SLOPE = 0.4                           # 53일차: [0.9,1.15]->[0.9,1.0] 기울기 0.1/0.25
 _NEUTRAL_BASE = 0.5                             # hook_score 결측 시 중립 기준
 _NONSELECTION_REASONS = {"boundary", "editing"}
 _MIN_SAMPLES, _MIN_VIDEOS, _MIN_CLASS_RATIO = 100, 3, 0.30     # Qwen 빌더와 동일 임계
 
 
-def _fetch_rows() -> list[dict]:
-    """51일차: round12 피드백 행 로드 (project_id 포함)"""
+def _fetch_rows(model_filter: str) -> list[dict]:
+    """51일차: 피드백 행 로드 (project_id 포함) / 52일차: 모델 필터 인자화"""
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -63,8 +71,9 @@ def _fetch_rows() -> list[dict]:
             "SELECT s.id, s.project_id, s.feedback, s.feedback_reason, s.is_exploration, "
             "s.hook_score, s.model_version, s.train_sample_json, p.youtube_url "
             "FROM shorts s JOIN projects p ON p.id = s.project_id "
-            "WHERE s.model_version LIKE '%round12%' AND s.feedback IS NOT NULL "
-            "AND s.train_sample_json IS NOT NULL"
+            "WHERE s.model_version LIKE ? AND s.feedback IS NOT NULL "
+            "AND s.train_sample_json IS NOT NULL",
+            (f"%{model_filter}%",),                          # 52일차: 파라미터화
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -79,13 +88,23 @@ def _yt_id(url: str) -> str:
 
 
 def _label_score(label: str, reason, base, include_nonsel: bool) -> float | None:
-    """51일차: B-2 상대 너지 - OK -> +Δ / NO(selection) -> −Δ, 비선택NO는 None(제외)"""
+    """51일차: B-2 상대 너지 - OK -> +Δ / NO(selection) -> −Δ, 비선택NO는 None(제외)
+    53일차: B안 상단 선형 압축 - OK raw > 0.9 구간을 [0.9, 1.0]으로 재배치 (순서 보존)"""
 
     if label == "NO" and (not include_nonsel) and reason in _NONSELECTION_REASONS:
         return None
     b = base if isinstance(base, (int, float)) else _NEUTRAL_BASE
-    delta = NUDGE_DELTA if label == "OK" else -NUDGE_DELTA
-    return round(max(0.0, min(1.0, b + delta)), 4)
+    # 53일차: 회귀 출력이 1.0 초과인 케이스 방어 - base를 [0,1]로 선클램프
+    # (b>1.0끼리는 타겟 동률이 되나, 압축 정의역 [0.9,1.15]를 보장하는 최소 조치)
+    b = max(0.0, min(1.0, b))
+    if label == "OK":
+        raw = b + NUDGE_DELTA
+        if raw > _COMPRESS_KNEE:
+            # 53일차: raw 1.15(=1.0+Δ) -> 정확히 1.0, 0.9 이하 대역은 무변
+            raw = _COMPRESS_KNEE + (raw - _COMPRESS_KNEE) * _COMPRESS_SLOPE
+    else:
+        raw = b - NUDGE_DELTA
+    return round(max(0.0, min(1.0, raw)), 4)
 
 
 def _old_media(sample: dict) -> tuple[list[str], str | None, str]:
@@ -152,6 +171,10 @@ def _report(records: list, skipped: dict) -> None:
     if scores:
         logger.info(f"타겟 분포: min {min(scores):.3f} / mean {sum(scores)/n:.3f} "
                     f"/ max {max(scores):.3f}")
+        # 53일차: 상단 압축 효과 검증 - 1.000 원자화 잔존량이 핵심 지표 (52일차 56건 대비)
+        n_one = sum(1 for s in scores if s >= 0.9999)
+        n_comp = sum(1 for s in scores if 0.9 < s < 0.9999)
+        logger.info(f"상단 검증: 타겟=1.000 {n_one}건 | 압축 대역(0.9~1.0) {n_comp}건")
     logger.info(f"제외: 비선택NO {skipped['nonsel']} | 미디어 {skipped['media']} "
                 f"| 파싱 {skipped['parse']}")
 
@@ -166,8 +189,8 @@ def _report(records: list, skipped: dict) -> None:
                            f"- 업샘플링/손실가중 검토 필요")
 
 
-def build(output: Path, include_nonsel: bool) -> None:
-    rows = _fetch_rows()
+def build(output: Path, include_nonsel: bool, model_filter: str) -> None:
+    rows = _fetch_rows(model_filter)                        # 52일차: 필터 전달
     logger.info(f"피드백 행 로드: {len(rows)}건")
 
     records, skipped = [], {"nonsel": 0, "media": 0, "parse": 0}
@@ -226,12 +249,15 @@ def build(output: Path, include_nonsel: bool) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="Gemma 피드백 -> 학습 JSONL (51일차)")
     p.add_argument("--output", default=DEFAULT_OUT, help="출력 JSONL 경로")
+    # 52일차: 라운드별 재사용 (r1=round12, r2=round14_fb1)
+    p.add_argument("--model-filter", default="round14_fb1",
+                   help="model_version LIKE 부분 문자열")
     p.add_argument("--include-nonselection-no", action="store_true",
                    help="boundary/editing NO도 −Δ 포함 (기본: 제외)")
     args = p.parse_args()
     if not DB_PATH.exists():
         raise SystemExit(f"DB 없음: {DB_PATH}")
-    build(Path(args.output), args.include_nonselection_no)
+    build(Path(args.output), args.include_nonselection_no, args.model_filter)
 
 
 if __name__ == "__main__":

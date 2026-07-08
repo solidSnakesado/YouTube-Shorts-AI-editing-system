@@ -1,7 +1,8 @@
 # 계층: 설정 계층 (Pydantic Settings)
 # 역할: Gemma 4 E4B 오디오 피벗 전용 설정 - 기존 config.Settings(Qwen)와 격리
 # 39일차 신규: Qwen 유지 + Gemma 추가(모델 셀렉터) 토대. config.py 무수정
-# 50일차 수정 1회: GEMMA_INFER_ADAPTER_DIR 신설 (수정본 기준 L40~42) — e2e 회귀 어댑터 경로
+# 50일차 수정 1회: GEMMA_INFER_ADAPTER_DIR 신설 (수정본 기준 L41~43) — e2e 회귀 어댑터 경로
+# 52일차 수정 2회: GEMMA_PUBLISH_THRESHOLD 신설 (수정본 기준 L45~51) — 계층 발행 임계
 #   - 동일 .env를 읽되 GEMMA_* 키만 사용(extra=ignore) -> 기존 Settings와 충돌 없음
 #   - 데이터 재구축(1fps 프레임 + 30s 오디오) + 추론 셀렉터(베이스/어댑터/활성) 공통 토대
 
@@ -40,6 +41,13 @@ class GemmaSettings(BaseSettings):
     # 50일차: e2e 회귀 추론 어댑터 (round12 final = round12_m1). GEMMA_ENABLED=true 시
     #   vlm_client가 이 경로로 gemma_phase_inference를 실행 (Qwen 경로보다 우선)
     GEMMA_INFER_ADAPTER_DIR: str = "./models/lora/gemma4/round12_final/final"
+
+    # --------------------------------------------------------------
+    # 계층 발행 정책 (52일차) - 점수 계층화 활용
+    # --------------------------------------------------------------
+    # 52일차: 활용 픽을 임계 기준 고신뢰/보충으로 태깅 (51일차 근거: ≥0.9 활용 픽
+    #   OK율 84.6% = round3 목표선 정책 도달. 단 영상 44%는 ≥0.9 픽 0건 -> 계층 발행)
+    GEMMA_PUBLISH_THRESHOLD: float = 0.9    # 고신뢰 발행 임계 (활용 픽 hook_score 기준)
 
     # --------------------------------------------------------------
     # 데이터 상한 (39일차) - 피벗 스펙: [1fps 프레임 + 30s 오디오, 정렬]

@@ -1,5 +1,6 @@
 # 계층: 비즈니스 로직 계층 (Service)
 # 50일차 신규 (전체 신규) — 레포 경로: app/services/gemma_phase_inference.py
+#   수정 4회(52일차): 계층 발행 태깅 - confidence_tier + reason 프리픽스 (수정본 기준 L215~234)
 #   수정 1회(50일차): gemma_sample import를 app.services.gemma_sample로 교정 (L27~29)
 #   수정 2회(50일차): 보존 경로 키 parent.name -> video.stem (다영상 덮어쓰기 방지)
 #   수정 3회(50일차): 파이프라인에서 stem="source" 충돌 발견 -> parent.name+stem 결합 (L116~120)
@@ -211,8 +212,24 @@ async def run_gemma_inference(
             result.append(cand)
             chosen_ids.add(id(cand))
 
+    # 52일차: 계층 발행 태깅 - 활용 픽을 고신뢰(≥임계, 발행 우선)/보충으로 구분
+    #   reason 프리픽스로 DB 스키마 무수정 가시화 + confidence_tier 키 (발행 필터용)
+    thr = gemma_settings.GEMMA_PUBLISH_THRESHOLD
+    tier_ko = {"high": "고신뢰", "fill": "보충", "explore": "탐색"}
+    for cand in result:
+        if cand.get("is_exploration"):
+            tier = "explore"
+        elif cand.get("hook_score", 0) >= thr:
+            tier = "high"
+        else:
+            tier = "fill"
+        cand["confidence_tier"] = tier
+        cand["reason"] = f"[{tier_ko[tier]}] {cand['reason']}"
+
     explore_picked = sum(1 for c in result if c.get("is_exploration"))
+    high_picked = sum(1 for c in result if c.get("confidence_tier") == "high")
     logger.info(
         f"Gemma 추론 완료: {len(all_highlights)}개 점수 -> {len(result)}개 선택 "
-        f"(활용 {len(result) - explore_picked} + 탐색 {explore_picked})")
+        f"(활용 {len(result) - explore_picked} + 탐색 {explore_picked} | "
+        f"고신뢰 {high_picked}, 임계 {thr})")
     return result

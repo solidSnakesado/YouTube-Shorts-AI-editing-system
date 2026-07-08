@@ -5,7 +5,8 @@
 [스크립트 정보]
 - 구분: 신규 (전체 신규)
 - 레포 경로: scripts/gemma_fb_audit.py
-- 수정 이력: 1차 작성 (51일차)
+- 수정 이력: 1차 작성 (51일차) / 수정 1회(52일차): --model-filter 인자화 +
+  출력 경로 필터별 분리 (수정본 기준 L29, L37~38, L68~73, L82~91, L134, L147)
 
 [배경]
 - 50일차 핸드오프 §6: gemma_phase_inference 수정 3회 이전 라벨은 보존 경로 키가
@@ -25,6 +26,7 @@
   python3 scripts/gemma_fb_audit.py
 """
 
+import argparse
 import json
 import sqlite3
 import sys
@@ -32,7 +34,8 @@ from collections import defaultdict
 from pathlib import Path
 
 DB_PATH = Path("data/shorts_ai.db")
-OUT_PATH = Path("data/finetune/gemma_fb_audit.json")
+# 52일차: 필터별 분리 저장 (round12 기존 매니페스트 보존)
+OUT_TMPL = "data/finetune/gemma_fb_audit_{tag}.json"
 
 
 def _extract_media(sample: dict) -> tuple[list[str], str | None]:
@@ -62,6 +65,12 @@ def _classify(video_id: str, frames: list[str], audio: str | None) -> str:
 
 
 def main():
+    # 52일차: 모델 버전 필터 인자화 (기본 round14_fb1 = r2 라벨)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model-filter", default="round14_fb1",
+                    help="model_version LIKE 부분 문자열 (예: round12, round14_fb1)")
+    args = ap.parse_args()
+
     if not DB_PATH.exists():
         print(f"[오류] DB 없음: {DB_PATH}", file=sys.stderr)
         sys.exit(1)
@@ -70,14 +79,16 @@ def main():
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # 51일차: round12 라벨 완료 행 전량 (usable + 경계NO 포함 — 포함 여부는 빌더에서 결정)
+    # 51일차: 라벨 완료 행 전량 (usable + 경계NO 포함 — 포함 여부는 빌더에서 결정)
+    # 52일차: 모델 필터 파라미터화
     cur.execute(
         """
         SELECT s.id, s.project_id, s.feedback, s.feedback_reason, s.is_exploration,
                s.hook_score, s.train_sample_json, p.youtube_url
         FROM shorts s JOIN projects p ON p.id = s.project_id
-        WHERE s.model_version LIKE '%round12%' AND s.feedback IS NOT NULL
-        """
+        WHERE s.model_version LIKE ? AND s.feedback IS NOT NULL
+        """,
+        (f"%{args.model_filter}%",),
     )
     rows = cur.fetchall()
     conn.close()
@@ -120,7 +131,7 @@ def main():
 
     # ---- 콘솔 리포트 ----
     print("=" * 60)
-    print(f"라벨 완료 round12 행: {len(rows)}건 (파싱 실패 {parse_fail})")
+    print(f"라벨 완료 행({args.model_filter}): {len(rows)}건 (파싱 실패 {parse_fail})")
     print(f"상태 분류: 정상 {counts['정상']} / 충돌 {counts['충돌']} / 유실 {counts['유실']}")
     print("-" * 60)
     print("라벨 분포 (feedback/사유):")
@@ -133,10 +144,11 @@ def main():
         print(f"  {pid[:8]}  윈도우 {len(p['windows'])}개  {p['youtube_url']}")
 
     # ---- 매니페스트 저장 (다음 단계 재추출 스크립트 입력) ----
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
+    out_path = Path(OUT_TMPL.format(tag=args.model_filter))    # 52일차: 필터별 분리
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(need, f, ensure_ascii=False, indent=2)
-    print(f"\n매니페스트 저장: {OUT_PATH}")
+    print(f"\n매니페스트 저장: {out_path}")
 
 
 if __name__ == "__main__":

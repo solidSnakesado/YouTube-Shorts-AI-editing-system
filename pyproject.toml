@@ -32,7 +32,7 @@ dependencies = [
     "sqlmodel>=0.0.38",
     "ultralytics>=8.4.33",
     "uvicorn[standard]>=0.43.0",
-    "yt-dlp>=2026.3.17",
+    "yt-dlp>=2026.7.4",
 ]
 
 [dependency-groups]

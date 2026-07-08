@@ -4,6 +4,13 @@
 #       HTTP 요청/응답 객체를 직접 다루지 않는다 (프레임워크 독립)
 # 의존: ProjectRepository (DI로 주입 받음)
 # MVA 원칙: 서비스 계층은 순수 비즈니스 로직만 포함, DB도 HTTP도 알지 못함
+# [수정 이력]
+# - 수정 1회(38일차): quality 파라미터 + --concurrent-fragments 8
+# - 수정 2회(53일차): yt-dlp 인증/런타임 인자 추가 — 봇 판정 해소 (터미널 실증 조합)
+#   ①L32~44 _firefox_profile 헬퍼 신규  ②L116~123 --js-runtimes node +
+#   --cookies-from-browser + --extractor-args(player_client=web) 주입
+#   근거: yt-dlp 2026.7.4는 기본 JS 런타임이 deno뿐(node 명시 필요) +
+#   수제 쿠키 파일은 1st-party 인증 쿠키(SID 계열) 누락 → 네이티브 추출로 전환
 
 """
 비디오 서비스
@@ -21,6 +28,17 @@ from loguru import logger       # loguru: 구조화된 로깅 라이브러리 (p
 from app.core.config import settings
 from app.models.domain import Project, ProjectStatus
 from app.repositories.project_repository import ProjectRepository
+
+# 53일차: Firefox 프로파일 자동 탐지 - --cookies-from-browser용
+#   수제 쿠키 파일(data/youtube_cookies.txt)은 SID 계열 1st-party 인증 쿠키가
+#   누락되어 봇 판정 지속 → yt-dlp 네이티브 추출(포맷 목록 실증)로 전환
+def _firefox_profile() -> str | None:
+    """53일차: default-release 프로파일 우선, 없으면 첫 프로파일 (미검출 시 None)"""
+
+    import glob
+    base = "/mnt/c/Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/"
+    hits = glob.glob(base + "*default-release*") or glob.glob(base + "*")
+    return hits[0] if hits else None
 
 class VideoService:
     """
@@ -95,8 +113,14 @@ class VideoService:
             # --merge-output-format mp4: 영상 + 오디오를 MP4로 합침
             # --no-playlist: 재생목록이면 단일 영상만 다운로드
             # --concurrent-fragments 8: 38일차 - 프래그먼트 8개 병렬 다운로드 (속도 향상)
+            # 53일차: --js-runtimes node(2026.7.4 기본이 deno뿐) + 네이티브 쿠키 +
+            #         player_client=web(43일차 403 방지 규칙) - 터미널 -F 실증 조합
+            profile = _firefox_profile()
             cmd_video = [
                 "yt-dlp",
+                "--js-runtimes", "node",
+                *(["--cookies-from-browser", f"firefox:{profile}"] if profile else []),
+                "--extractor-args", "youtube:player_client=web",
                 "-f", f"bestvideo[height<={quality}][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}]",
                 "--merge-output-format", "mp4",
                 "--no-playlist",

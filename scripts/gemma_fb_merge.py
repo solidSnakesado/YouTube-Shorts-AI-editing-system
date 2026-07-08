@@ -5,7 +5,8 @@
 [스크립트 정보]
 - 구분: 신규 (전체 신규)
 - 레포 경로: scripts/gemma_fb_merge.py
-- 수정 이력: 1차 작성 (51일차)
+- 수정 이력: 1차 작성 (51일차) -> 수정 1회(52일차): --feedback 다중 파일(nargs='+') +
+  기본 [r1, r2] 누적 + 기본 출력 train_round3 (수정본 기준 L20, L35~38, L78~79, L85~96, L122~123)
 
 [설계 근거]
 - round12는 datasets/gemma_audio_v2/{train,eval}_qwenfmt.jsonl로 학습/평가됨 (49일차)
@@ -16,7 +17,7 @@
 - 업샘플 기본 2배 (35일차 교훈: 과업샘플=평균 회귀 -> 2~3 권장)
 
 [출력]
-  datasets/gemma_audio_v2/train_round2.jsonl (기존 파일 무수정 — 비파괴)
+  기본 datasets/gemma_audio_v2/train_round3.jsonl (기존 파일 무수정 — 비파괴)
 
 [실행]
   python3 scripts/gemma_fb_merge.py
@@ -31,8 +32,10 @@ from pathlib import Path
 
 DEFAULT_TRAIN = "datasets/gemma_audio_v2/train_qwenfmt.jsonl"
 DEFAULT_EVAL = "datasets/gemma_audio_v2/eval_qwenfmt.jsonl"
-DEFAULT_FB = "datasets/gemma_audio/dataset_feedback_r1.jsonl"
-DEFAULT_OUT = "datasets/gemma_audio_v2/train_round2.jsonl"
+# 52일차: 누적 피드백 기본 [r1, r2] — 3차 학습은 전 사이클 피드백을 모두 포함
+DEFAULT_FB = ["datasets/gemma_audio/dataset_feedback_r1.jsonl",
+              "datasets/gemma_audio/dataset_feedback_r2.jsonl"]
+DEFAULT_OUT = "datasets/gemma_audio_v2/train_round3.jsonl"    # 52일차: 기본 r3
 DEFAULT_SEED = 42
 
 
@@ -72,22 +75,25 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="피드백 -> v2 train 병합 (eval 고정)")
     ap.add_argument("--train", default=DEFAULT_TRAIN)
     ap.add_argument("--eval", dest="eval_path", default=DEFAULT_EVAL)
-    ap.add_argument("--feedback", default=DEFAULT_FB)
+    # 52일차: 다중 피드백 파일 (누적 사이클)
+    ap.add_argument("--feedback", nargs="+", default=DEFAULT_FB)
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--upsample", type=int, default=2, help="피드백 업샘플 배수 (기본 2)")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = ap.parse_args()
 
-    paths = {k: Path(v) for k, v in
-             [("train", args.train), ("eval", args.eval_path), ("feedback", args.feedback)]}
-    for name, p in paths.items():
+    # 52일차: 피드백 다중화 — train/eval + 피드백 목록 각각 실존 검증
+    paths = {"train": Path(args.train), "eval": Path(args.eval_path)}
+    fb_paths = [Path(p) for p in args.feedback]
+    for name, p in list(paths.items()) + [(f"feedback[{i}]", p) for i, p in enumerate(fb_paths)]:
         if not p.is_file():
             print(f"파일 없음 ({name}): {p}")
             return 1
 
     train_rows = load_jsonl(paths["train"])
     eval_rows = load_jsonl(paths["eval"])
-    fb_rows = load_jsonl(paths["feedback"])
+    fb_per_file = [(p, load_jsonl(p)) for p in fb_paths]        # 52일차: 파일별 보존(리포트)
+    fb_rows = [s for _, rows in fb_per_file for s in rows]
 
     # 51일차: 누수 검사 - eval 영상 YouTube ID vs 피드백 yt_id
     eval_vids = {video_id_of(s) for s in eval_rows}
@@ -113,6 +119,8 @@ def main() -> int:
     fb_scores = [t for t in (target_score(s) for s in kept) if t is not None]
     fb_labels = Counter(s.get("metadata", {}).get("feedback", "?") for s in kept)
     print("=" * 60)
+    for p, rows in fb_per_file:                                 # 52일차: 파일별 행수
+        print(f"피드백 입력: {p} ({len(rows)}행)")
     print(f"train(기존) {len(train_rows)} + 피드백 {len(kept)}x{up} = {len(merged)}행 -> {out}")
     print(f"eval 고정: {paths['eval']} ({len(eval_rows)}행, 무수정)")
     print(f"누수 제외: {len(leaked)}건" + (f" ({sorted(set(leaked))})" if leaked else ""))
