@@ -1,5 +1,7 @@
 # 계층: 비즈니스 로직 계층 (Service)
 # 50일차 신규 (전체 신규) — 레포 경로: app/services/gemma_phase_inference.py
+#   수정 5회(56일차): 추론 종료 시 VRAM 미회수 버그 — finally 블록에 gc.collect 선행
+#     (release_vram) + collate/norm 참조 제거 + 잔량 로그 (수정본 기준 L177~188)
 #   수정 4회(52일차): 계층 발행 태깅 - confidence_tier + reason 프리픽스 (수정본 기준 L215~234)
 #   수정 1회(50일차): gemma_sample import를 app.services.gemma_sample로 교정 (L27~29)
 #   수정 2회(50일차): 보존 경로 키 parent.name -> video.stem (다영상 덮어쓰기 방지)
@@ -173,10 +175,17 @@ async def run_gemma_inference(
             if (i + 1) % max(1, len(windows) // 5) == 0:
                 logger.info(f"Gemma 진행: {i + 1}/{len(windows)}윈도우 | 점수 수집: {len(all_highlights)}개")
     finally:
-        # 50일차: 모델 해제 (API 서버 상주 시 VRAM 반환 — Qwen unload와 동일 취지)
-        import torch
-        del model
-        torch.cuda.empty_cache()
+        # 56일차 수정 5회: 상주 VRAM 미회수 버그 수정 — 기존 del model+empty_cache만으로는
+        #   순환 참조(PEFT/unsloth)가 남아 캐시 반환이 무효 -> 다음 영상 전사(Whisper)가
+        #   공유 메모리 spillover로 수십 분 지연. gc.collect 선행 + collate/norm 참조 제거
+        #   + 잔량 로그로 회수 여부를 실측 가시화 (gpu_manager 표준 절차 재사용)
+        from app.core.gpu_manager import get_vram_status, release_vram
+        del model, collate, norm
+        release_vram()                      # gc.collect() + torch.cuda.empty_cache()
+        vram = get_vram_status()
+        logger.info(
+            f"Gemma 스택 언로드 | VRAM allocated {vram['allocated_mb']}MB / "
+            f"reserved {vram['reserved_mb']}MB")
 
     # quota 선택: 활용(top-K, IoU 억제) + 탐색(저득점 랜덤) — phase2 36일차(F)와 동일 로직
     all_highlights.sort(key=lambda h: h.get("hook_score", 0), reverse=True)

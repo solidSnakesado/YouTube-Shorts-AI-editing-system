@@ -1,16 +1,14 @@
-# 48일차: gemma_e2e_train.py — 신규 | 49일차 수정 1회째 | 51일차 수정 2회째
+# 48일차: gemma_e2e_train.py — 신규 | 49일차 수정 1회 | 51일차 수정 2회 | 56일차 수정 3회째
 # 레포 경로: yt_shorts_ai/scripts/gemma_e2e_train.py
-# 51일차 수정 이력 (수정본 기준 라인):
-#   ①L129~138 — save_best 추가 (best 별도 보존, 49일차 step1100 0.298 유실 교훈)
-#   ②L169~170 — --margin 기본값 0.1→1.0 (round12_m1 확정값, 실수 재발 방지)
-#   ③L223, L254~L260 — 주기 평가에서 best 갱신 시 out/best/ 저장
-#   ④L269~L283 — 최종 판정 블록을 2차 학습 기준으로 교체 (본 판정=OK-rate 명시)
-# 49일차 수정 이력 (수정본 기준 라인):
-#   ①L99~121 — 체크포인트 회전 추가 (rotate_ckpts + save_ckpt keep 인자)
-#   ②L155~157 — --save-limit 인자 추가 (기본 2개 유지), L241·L244 호출부 전달
-#   ③L247~259 — 최종 판정 블록을 round13 기준으로 교체
-#     (round12 실측 0.2671 대비: +0.03 초과=주입 유효 / ±0.02 이내=주입 무효)
-#   학습 로직 무수정 — round12와 동일 코드, 변인은 입력 jsonl(*_inj)만
+# 56일차 수정 이력 (수정본 기준 라인):
+#   ①L138~149 — load_best_rho 추가: 재개 시 best_meta.json의 rho를 승계
+#     (55일차 버그: 재개 후 -inf 초기화 → s1300(0.216)이 재개 전 best s1100(0.308)을 덮어씀)
+#   ②L235 — best_rho 초기화를 load_best_rho(args.out)로 교체
+#   학습 로직 무수정 — round17과 동일 코드, 변인은 입력 jsonl(train_round6)만
+# 51일차 수정 이력: ①save_best 추가(49일차 step1100 0.298 유실 교훈) ②--margin 기본 1.0
+#   ③주기 평가 best 갱신 저장 ④최종 판정 블록 2차 학습 기준(본 판정=OK-rate)
+# 49일차 수정 이력: ①체크포인트 회전(rotate_ckpts) ②--save-limit 인자(기본 2)
+#   ③최종 판정 블록 round13 기준 교체 (학습 로직 무수정)
 # 역할: 방안 1(round12)/방안 2(round13) 학습 — Colab A100 전용
 #   - 커스텀 학습 루프 (SFTTrainer 미사용: CE 전제라 부적합)
 #   - 손실 = 랭킹(pairwise margin hinge, C-1/C-2 6회 무붕괴 검증 공식 그대로) + 약한 MSE
@@ -137,6 +135,20 @@ def save_best(model, out_dir: str, step: int, rho: float, norm: dict) -> None:
     print(f"[best] step {step} rho(서브셋)={rho:.4f} → {bd}")
 
 
+def load_best_rho(out_dir: str) -> float:
+    """56일차: 재개 시 best-rho 승계 — out/best/best_meta.json의 rho를 초기값으로 로드.
+    55일차 버그 수정: 재개 후 -inf 초기화로 열위 체크포인트가 best/를 덮어쓰던 문제.
+    best/ 없으면(신규 라운드) -inf — 기존 동작과 동일."""
+    import json as _json
+    p = os.path.join(out_dir, "best", "best_meta.json")
+    if not os.path.isfile(p):
+        return float("-inf")
+    with open(p) as f:
+        rho = float(_json.load(f).get("rho_subset", float("-inf")))
+    print(f"[best] 승계: 기존 best rho(서브셋)={rho:.4f} — 이하 갱신 시에만 재저장")
+    return rho
+
+
 def load_resume(model, opt, resume_dir: str) -> int:
     """--resume: LoRA 가중치 + 헤드 + 옵티마이저 + step 복원."""
     import torch
@@ -220,7 +232,7 @@ def main() -> None:
     steps_per_ep = (n + args.batch - 1) // args.batch
     total_steps = steps_per_ep * args.epochs
     step = start_step
-    best_rho = float("-inf")        # 51일차: best 추적 (재개 시 초기화 — 재저장 무해)
+    best_rho = load_best_rho(args.out)  # 56일차: 재개 시 best-rho 승계 (55일차 버그 수정)
     t0 = time.time()
     model.train()
     print(f"총 {total_steps} step ({steps_per_ep}/ep × {args.epochs}ep), "
